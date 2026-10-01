@@ -469,6 +469,8 @@ body {
 }
 
 .ticker-row .tick-text {
+  /* A block, so long steps get their ellipsis instead of running on. */
+  display: block;
   font: 500 13px var(--font);
   white-space: nowrap;
   overflow: hidden;

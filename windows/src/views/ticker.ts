@@ -36,9 +36,12 @@ function makeRow(): Row {
   check.style.position = "absolute";
   chevron.style.position = "absolute";
   const shimmer = h("span", { class: "tick-text shimmer" });
+  // Pinned to the top of the row: left at its static position, the dim copy of
+  // a step long enough to fill the line wrapped onto the next one and sat on
+  // top of the row below.
   const dim = h("span", {
     class: "tick-text",
-    style: "position:absolute;left:0;right:0;color:#6b7079",
+    style: "position:absolute;left:0;right:0;top:0;color:#6b7079",
   });
   const el = h(
     "div",
