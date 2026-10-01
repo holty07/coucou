@@ -92,6 +92,8 @@ export interface Settings {
   hooksInstalled: boolean;
   /** Claude model used by the chat. */
   model: string;
+  /** "plan": chat through Claude Code on the user's Claude plan. "api": the API key. */
+  chatBackend: "plan" | "api";
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -106,6 +108,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  chatBackend: "plan",
 };
 
 type Listener = () => void;

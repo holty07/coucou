@@ -1,6 +1,9 @@
 // Claude API client — the same integration as ClaudeService.swift: multi-turn
 // chat with web search, and files sent as document/image/text blocks.
 //
+// With no API key stored, chat goes through the user's Claude Code install
+// instead (claude_code.rs), so it runs on their Claude plan.
+//
 // Everything happens here rather than in the island: the API key never leaves
 // the Credential Manager, and file bytes never cross the IPC boundary.
 
@@ -31,11 +34,14 @@ No markdown formatting (no **, no ##, no bullet dashes). Use plain text with lin
 pub struct Chat {
     /// Full multi-turn history, including tool_use / tool_result blocks.
     messages: Mutex<Vec<Value>>,
+    /// The Claude Code session carrying the conversation, when chatting through it.
+    session: Mutex<Option<String>>,
 }
 
 impl Chat {
     pub fn reset(&self) {
         self.messages.lock().unwrap().clear();
+        *self.session.lock().unwrap() = None;
     }
 
     fn is_empty(&self) -> bool {
@@ -73,11 +79,17 @@ pub struct ChatReply {
 pub async fn send(
     chat: &Chat,
     model: &str,
+    backend: &str,
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let key = secrets::get("anthropic-api-key")
-        .ok_or_else(|| "API key missing. Open settings.".to_string())?;
+    // The user's Claude plan through Claude Code, unless they chose the API key
+    // (or there is no Claude Code to use and a key is all we have).
+    let key = secrets::get("anthropic-api-key");
+    let key = match key {
+        Some(k) if backend == "api" || !crate::claude_code::available() => k,
+        _ => return send_on_plan(chat, query, context).await,
+    };
 
     let mut content: Vec<Value> = Vec::new();
 
@@ -155,6 +167,20 @@ pub async fn send(
         return Err("No response text.".into());
     }
     Ok(ChatReply { text })
+}
+
+/// One turn through Claude Code; the conversation continues its session.
+async fn send_on_plan(
+    chat: &Chat,
+    query: String,
+    context: Option<ChatContext>,
+) -> Result<ChatReply, String> {
+    let session = chat.session.lock().unwrap().clone();
+    let (reply, id) = crate::claude_code::send(session, SYSTEM_PROMPT, query, context).await?;
+    if !id.is_empty() {
+        *chat.session.lock().unwrap() = Some(id);
+    }
+    Ok(reply)
 }
 
 async fn call(key: &str, body: &Value) -> Result<Value, String> {

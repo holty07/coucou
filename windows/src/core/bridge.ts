@@ -36,6 +36,8 @@ export interface BootInfo {
   screen: { x: number; y: number; width: number; height: number; scale: number };
   version: string;
   hookPath: string;
+  /** Claude Code is installed: chat can run on the user's plan with no API key. */
+  claudeCode?: boolean;
 }
 
 export const Bridge = {

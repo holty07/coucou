@@ -21,6 +21,14 @@ pub struct Settings {
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
+    /// What the chat runs on: "plan" (Claude Code, the user's Claude plan) or
+    /// "api" (the stored API key, billed separately).
+    #[serde(default = "default_chat_backend")]
+    pub chat_backend: String,
+}
+
+fn default_chat_backend() -> String {
+    "plan".to_string()
 }
 
 fn default_model() -> String {
@@ -44,6 +52,7 @@ impl Default for Settings {
             autostart: false,
             hooks_installed: false,
             model: default_model(),
+            chat_backend: default_chat_backend(),
         }
     }
 }

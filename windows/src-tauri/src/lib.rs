@@ -1,6 +1,7 @@
 // Coucou for Windows and Linux — app wiring and the commands the island calls.
 
 mod claude;
+mod claude_code;
 mod clock;
 mod files;
 mod hooks;
@@ -104,6 +105,7 @@ pub struct BootInfo {
     screen: ScreenInfo,
     version: String,
     hook_path: String,
+    claude_code: bool,
 }
 
 #[tauri::command]
@@ -117,6 +119,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
         screen,
         version: env!("CARGO_PKG_VERSION").to_string(),
         hook_path: settings::hook_exe_path().to_string_lossy().to_string(),
+        claude_code: claude_code::available(),
     }
 }
 
@@ -321,8 +324,11 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    let (model, backend) = {
+        let s = shared.settings.lock().unwrap();
+        (s.model.clone(), s.chat_backend.clone())
+    };
+    claude::send(&chat, &model, &backend, query, context).await
 }
 
 #[tauri::command]

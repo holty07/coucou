@@ -9,6 +9,23 @@ import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let version = "";
+/** Claude Code is installed, so chat can run on the user's plan without a key. */
+let claudeCode = false;
+
+const KEY_STORE = navigator.userAgent.includes("Windows")
+  ? "the Windows Credential Manager"
+  : "your system keyring";
+
+function chatStatus(present: boolean): string {
+  const onPlan = claudeCode && (settings.chatBackend !== "api" || !present);
+  if (onPlan) {
+    return present
+      ? `Chat runs on your Claude plan through Claude Code. Your API key stays in ${KEY_STORE}, unused.`
+      : "Chat runs on your Claude plan through Claude Code.";
+  }
+  if (present) return `Chat uses your API key (billed separately). Stored in ${KEY_STORE}.`;
+  return "No key yet — the chat needs one, or install Claude Code to use your plan.";
+}
 
 const root = document.getElementById("settings-root")!;
 
@@ -180,8 +197,8 @@ const MODELS: [string, string][] = [
 ];
 
 function apiSection(hasKey: boolean): HTMLElement {
-  const dot = statusDot(hasKey);
-  const state = h("span", { class: "hint", text: hasKey ? "Key saved in the Windows Credential Manager." : "No key yet — the chat needs one." });
+  const dot = statusDot(hasKey || claudeCode);
+  const state = h("span", { class: "hint", text: chatStatus(hasKey) });
 
   const field = h("input", {
     type: "password",
@@ -197,10 +214,8 @@ function apiSection(hasKey: boolean): HTMLElement {
 
   async function refresh() {
     const present = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
-    dot.style.background = present ? "#22c55e" : "#f4505e";
-    state.textContent = present
-      ? "Key saved in the Windows Credential Manager."
-      : "No key yet — the chat needs one.";
+    dot.style.background = present || claudeCode ? "#22c55e" : "#f4505e";
+    state.textContent = chatStatus(present);
     field.placeholder = present ? "••••••••••••  (stored)" : "sk-ant-...";
     clearBtn.style.display = present ? "" : "none";
   }
@@ -243,13 +258,28 @@ function apiSection(hasKey: boolean): HTMLElement {
 
   clearBtn.style.display = hasKey ? "" : "none";
 
+  const backend = h("select", {}) as HTMLSelectElement;
+  backend.append(
+    h("option", { value: "plan", text: "My Claude plan (Claude Code)" }),
+    h("option", { value: "api", text: "API key (billed separately)" }),
+  );
+  backend.value = settings.chatBackend ?? "plan";
+  backend.disabled = !claudeCode;
+  backend.addEventListener("change", async () => {
+    settings.chatBackend = backend.value === "api" ? "api" : "plan";
+    void save();
+    await refresh();
+  });
+
   return h(
     "section",
     {},
     h("h2", {}, dot, h("span", { text: "Claude" })),
     state,
+    h("div", { class: "row" }, h("label", { text: "Chat runs on" }), backend),
     h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
+    h("div", { class: "hint", text: "The model applies to the API key. Through Claude Code, chat uses your Claude Code default model." }),
     feedback,
   );
 }
@@ -424,6 +454,7 @@ async function main() {
   if (boot) {
     settings = { ...settings, ...boot.settings };
     version = boot.version;
+    claudeCode = boot.claudeCode ?? false;
   }
   const status = (await Bridge.hooksStatus()) ?? {
     installed: false, settingsPath: "", hookPath: "", hookReady: false,

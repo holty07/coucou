@@ -93,6 +93,11 @@ fn connect() -> Option<std::os::unix::net::UnixStream> {
 }
 
 fn main() {
+    // Coucou's own chat runs through Claude Code; its events are not a session
+    // to show. (Coucou already starts it without hooks; this is the backstop.)
+    if std::env::var_os("COUCOU_CHAT").is_some() {
+        std::process::exit(0);
+    }
     let Some((payload, event)) = read_event() else { std::process::exit(0) };
 
     let waits_for_answer = event == "PermissionRequest";
