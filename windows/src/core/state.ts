@@ -62,6 +62,7 @@ const task = (
 export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_claude", "Claude Code", "#F5F6F8", "claudeCode"),
   task("integration_resend", "Resend", "#22C55E", "n8n"),
+  task("integration_slack", "Slack", "#36C5F0", "n8n"),
   task("integration_n8n", "n8n", "#F29B38", "n8n"),
   task("integration_vercel", "Vercel", "#7C5CFF", "n8n"),
   task("integration_github", "GitHub", "#F4505E", "n8n"),

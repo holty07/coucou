@@ -16,6 +16,7 @@ const KEY_FOR: Record<string, string> = {
   integration_resend: "resend-api-key",
   integration_notion: "notion-api-key",
   integration_calcom: "calcom-api-key",
+  integration_slack: "slack-token",
 };
 
 const clearTimers = new Map<string, number>();
@@ -81,6 +82,16 @@ function handle(island: Island, update: IntegrationUpdate) {
           State.notify();
         }, 60_000),
       );
+    }
+  }
+
+  // Slack's pill stays curious for as long as DMs are waiting — not just for
+  // the 60 s after one arrives.
+  if (update.id === "integration_slack" && !update.error) {
+    const task = State.tasks.find((t) => t.id === update.id);
+    const unread = Number((update.data as { unread?: number }).unread ?? 0);
+    if (task && task.state !== "finished" && task.state !== "error") {
+      task.state = unread > 0 ? "question" : "idle";
     }
   }
 

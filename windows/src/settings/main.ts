@@ -312,6 +312,8 @@ const INTEGRATIONS: IntegrationDef[] = [
     fields: [{ key: "notion-api-key", label: "Integration token", placeholder: "ntn_…", secret: true }] },
   { id: "integration_calcom", name: "Cal.com", color: "#C9956A",
     fields: [{ key: "calcom-api-key", label: "API key", placeholder: "cal_…", secret: true }] },
+  { id: "integration_slack", name: "Slack", color: "#36C5F0",
+    fields: [{ key: "slack-token", label: "User token", placeholder: "xoxp-…", secret: true }] },
 ];
 
 const MAX_ACTIVE = 4;
@@ -322,7 +324,7 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
 
   function updateNote() {
     const used = settings.activeIntegrations.length;
-    note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Mochi — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
+    note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Mochi — ${used}/${MAX_ACTIVE} in use. Keys are stored in ${KEY_STORE}, never on disk.`;
   }
 
   for (const def of INTEGRATIONS) {
@@ -465,6 +467,7 @@ async function main() {
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",
     "n8n-url", "n8n-api-key", "resend-api-key", "notion-api-key", "calcom-api-key",
+    "slack-token",
   ];
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;

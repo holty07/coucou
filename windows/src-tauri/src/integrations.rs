@@ -1,5 +1,6 @@
 // Integration pollers — the Rust side of StripePoller / GithubPoller /
-// VercelPoller / N8nPoller / ResendPoller / NotionPoller / CalcomPoller.
+// VercelPoller / N8nPoller / ResendPoller / NotionPoller / CalcomPoller, plus
+// Slack (this fork; no macOS counterpart).
 //
 // Same endpoints, same first-run delays and intervals as the Swift pollers. Each
 // one emits an `integration` event; the island owns the badge, the sound and the
@@ -67,7 +68,8 @@ pub fn start(app: AppHandle) {
     spawn(app.clone(), "integration_resend", 6, 60, poll_resend);
     spawn(app.clone(), "integration_github", 7, 300, poll_github);
     spawn(app.clone(), "integration_calcom", 8, 300, poll_calcom);
-    spawn(app, "integration_notion", 9, 300, poll_notion);
+    spawn(app.clone(), "integration_notion", 9, 300, poll_notion);
+    spawn(app, "integration_slack", 4, 60, poll_slack);
 }
 
 /// True when the user has this integration switched on in settings.
@@ -112,6 +114,7 @@ pub async fn poll_once(app: AppHandle, id: &str) {
         "integration_resend" => poll_resend(app).await,
         "integration_notion" => poll_notion(app).await,
         "integration_calcom" => poll_calcom(app).await,
+        "integration_slack" => poll_slack(app).await,
         _ => {}
     }
 }
@@ -451,6 +454,289 @@ async fn poll_resend(app: AppHandle) {
     });
 }
 
+// ── Slack ─────────────────────────────────────────────────────────────────────
+//
+// Unread direct messages (1:1 and group DMs). Slack's public API has no "total
+// unread" call and only reports unread counts for DMs, one conversation at a
+// time (conversations.info, Tier 3 ≈ 50/min). So each poll spends a fixed
+// budget: DMs that were unread last time first, then the next slice of the rest
+// in rotation. A DM from a quiet contact is noticed within a few polls, never
+// at the cost of a rate limit. User token scopes: im:read, mpim:read, users:read.
+
+/// conversations.info calls per poll, under Slack's Tier 3 limit with room to spare.
+const SLACK_BUDGET: usize = 40;
+/// The DM list itself changes rarely; re-read it every this many polls.
+const SLACK_LIST_EVERY: u32 = 10;
+
+#[derive(Default)]
+struct SlackState {
+    /// Token the cache below belongs to; a new token starts over.
+    token_tag: String,
+    team: String,
+    dms: Vec<SlackDm>,
+    polls: u32,
+    cursor: usize,
+    unread: std::collections::HashMap<String, i64>,
+    names: std::collections::HashMap<String, String>,
+    /// Newest unread message seen per DM, so a new message fires once.
+    seen_latest: std::collections::HashMap<String, String>,
+    /// Every DM has been checked once. Until then unread messages are ones the
+    /// user already had, not news: fill the card, make no sound.
+    swept_once: bool,
+}
+
+#[derive(Clone)]
+struct SlackDm {
+    id: String,
+    /// The other person, for a 1:1 DM.
+    user: Option<String>,
+    /// Slack's `mpdm-a--b--c-1` name, for a group DM.
+    group: Option<String>,
+}
+
+static SLACK: std::sync::LazyLock<tokio::sync::Mutex<SlackState>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(SlackState::default()));
+
+enum SlackError {
+    /// Show this on the card.
+    Report(String),
+    /// Rate limited or a network blip: try again next poll, say nothing.
+    Quiet,
+}
+
+async fn slack_call(token: &str, method: &str, query: &[(&str, &str)]) -> Result<Value, SlackError> {
+    let response = client()
+        .get(format!("https://slack.com/api/{method}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .query(query)
+        .send()
+        .await
+        .map_err(|_| SlackError::Quiet)?;
+    if response.status().as_u16() == 429 {
+        return Err(SlackError::Quiet);
+    }
+    let json: Value = response.json().await.map_err(|_| SlackError::Quiet)?;
+    if json.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(json);
+    }
+    let err = json.get("error").and_then(Value::as_str).unwrap_or("unknown_error");
+    Err(match err {
+        "ratelimited" => SlackError::Quiet,
+        "invalid_auth" | "not_authed" | "token_revoked" | "token_expired" | "account_inactive" => {
+            SlackError::Report("Invalid token".into())
+        }
+        "missing_scope" => {
+            let needed = json.get("needed").and_then(Value::as_str).unwrap_or("im:read, mpim:read, users:read");
+            SlackError::Report(format!("Token lacks scope: {needed}"))
+        }
+        other => SlackError::Report(format!("Slack: {other}")),
+    })
+}
+
+async fn slack_list_dms(token: &str) -> Result<Vec<SlackDm>, SlackError> {
+    let mut out = Vec::new();
+    let mut cursor = String::new();
+    // A generous ceiling: 10 pages of 200.
+    for _ in 0..10 {
+        let mut query = vec![("types", "im,mpim"), ("exclude_archived", "true"), ("limit", "200")];
+        if !cursor.is_empty() {
+            query.push(("cursor", cursor.as_str()));
+        }
+        let page = slack_call(token, "users.conversations", &query).await?;
+        for c in page.get("channels").and_then(Value::as_array).into_iter().flatten() {
+            let Some(id) = c.get("id").and_then(Value::as_str) else { continue };
+            if c.get("is_user_deleted").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            out.push(SlackDm {
+                id: id.to_string(),
+                user: c.get("user").and_then(Value::as_str).map(str::to_string),
+                group: c.get("is_mpim").and_then(Value::as_bool).filter(|m| *m)
+                    .and_then(|_| c.get("name").and_then(Value::as_str))
+                    .map(str::to_string),
+            });
+        }
+        cursor = page
+            .get("response_metadata")
+            .and_then(|m| m.get("next_cursor"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if cursor.is_empty() {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// `mpdm-alice--bob--carol-1` → `alice, bob, carol`
+fn slack_group_name(raw: &str) -> String {
+    let trimmed = raw.strip_prefix("mpdm-").unwrap_or(raw);
+    let trimmed = trimmed.rsplit_once('-').map(|(a, _)| a).unwrap_or(trimmed);
+    trimmed.split("--").collect::<Vec<_>>().join(", ")
+}
+
+async fn slack_user_name(token: &str, state: &mut SlackState, user: &str) -> String {
+    if let Some(name) = state.names.get(user) {
+        return name.clone();
+    }
+    let name = match slack_call(token, "users.info", &[("user", user)]).await {
+        Ok(v) => {
+            let u = v.get("user");
+            let profile = u.and_then(|u| u.get("profile"));
+            [
+                profile.and_then(|p| p.get("display_name")),
+                profile.and_then(|p| p.get("real_name")),
+                u.and_then(|u| u.get("name")),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find(|s| !s.is_empty())
+            .unwrap_or("Someone")
+            .to_string()
+        }
+        Err(_) => return "Someone".into(),
+    };
+    state.names.insert(user.to_string(), name.clone());
+    name
+}
+
+async fn poll_slack(app: AppHandle) {
+    let Some(token) = secrets::get("slack-token") else { return };
+    let report = |app: &AppHandle, message: String| {
+        emit(app, IntegrationUpdate {
+            id: "integration_slack",
+            data: json!({}),
+            error: Some(message),
+            event: None,
+        });
+    };
+
+    let mut state = SLACK.lock().await;
+    let tag: String = token.chars().rev().take(8).collect();
+    if state.token_tag != tag {
+        *state = SlackState { token_tag: tag, ..SlackState::default() };
+    }
+
+    if state.team.is_empty() {
+        match slack_call(&token, "auth.test", &[]).await {
+            Ok(v) => state.team = v.get("team_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+            Err(SlackError::Report(m)) => return report(&app, m),
+            Err(SlackError::Quiet) => return,
+        }
+    }
+    if state.dms.is_empty() || state.polls % SLACK_LIST_EVERY == 0 {
+        match slack_list_dms(&token).await {
+            Ok(dms) => state.dms = dms,
+            Err(SlackError::Report(m)) => return report(&app, m),
+            Err(SlackError::Quiet) => {}
+        }
+    }
+    state.polls = state.polls.wrapping_add(1);
+
+    // This poll's slice: everything unread last time, then the rotation.
+    let total = state.dms.len();
+    let mut batch: Vec<SlackDm> = state
+        .dms
+        .iter()
+        .filter(|d| state.unread.get(&d.id).copied().unwrap_or(0) > 0)
+        .take(SLACK_BUDGET)
+        .cloned()
+        .collect();
+    let mut steps = 0;
+    let mut wrapped = false;
+    while batch.len() < SLACK_BUDGET && steps < total {
+        let dm = state.dms[state.cursor % total].clone();
+        state.cursor = (state.cursor + 1) % total.max(1);
+        wrapped |= state.cursor == 0;
+        steps += 1;
+        if !batch.iter().any(|b| b.id == dm.id) {
+            batch.push(dm);
+        }
+    }
+
+    let mut newest: Option<(String, String, String)> = None; // (dm id, latest ts, who)
+    for dm in &batch {
+        let info = match slack_call(&token, "conversations.info", &[("channel", dm.id.as_str())]).await {
+            Ok(v) => v,
+            Err(SlackError::Report(m)) => return report(&app, m),
+            // Rate limited mid-poll: keep what we have and carry on next time.
+            Err(SlackError::Quiet) => break,
+        };
+        let channel = info.get("channel");
+        let count = channel
+            .and_then(|c| c.get("unread_count_display").or_else(|| c.get("unread_count")))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        state.unread.insert(dm.id.clone(), count);
+        if count > 0 {
+            let latest = channel
+                .and_then(|c| c.get("latest"))
+                .and_then(|l| l.get("ts"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if state.seen_latest.get(&dm.id) != Some(&latest) {
+                state.seen_latest.insert(dm.id.clone(), latest.clone());
+                if state.swept_once {
+                    let who = match (&dm.user, &dm.group) {
+                        (Some(u), _) => slack_user_name(&token, &mut state, u).await,
+                        (_, Some(g)) => slack_group_name(g),
+                        _ => "Someone".into(),
+                    };
+                    newest = Some((dm.id.clone(), latest, who));
+                }
+            }
+        } else {
+            state.seen_latest.remove(&dm.id);
+        }
+    }
+
+    // The card: total and the top few senders.
+    let mut unread: Vec<(SlackDm, i64)> = state
+        .dms
+        .iter()
+        .filter_map(|d| state.unread.get(&d.id).copied().filter(|n| *n > 0).map(|n| (d.clone(), n)))
+        .collect();
+    unread.sort_by(|a, b| b.1.cmp(&a.1));
+    let total_unread: i64 = unread.iter().map(|(_, n)| n).sum();
+    let mut rows = Vec::new();
+    for (dm, count) in unread.into_iter().take(4) {
+        let who = match (&dm.user, &dm.group) {
+            (Some(u), _) => slack_user_name(&token, &mut state, u).await,
+            (_, Some(g)) => slack_group_name(g),
+            _ => "Someone".into(),
+        };
+        rows.push(json!({
+            "name": who,
+            "count": count,
+            "url": format!("https://app.slack.com/client/{}/{}", state.team, dm.id),
+        }));
+    }
+    let checked = state.unread.len();
+    if wrapped {
+        state.swept_once = true;
+    }
+
+    emit(&app, IntegrationUpdate {
+        id: "integration_slack",
+        data: json!({
+            "unread": total_unread,
+            "conversations": rows,
+            "checked": checked,
+            "total": total,
+            "teamUrl": format!("https://app.slack.com/client/{}", state.team),
+        }),
+        error: None,
+        event: newest.map(|(_, _, who)| IntegrationEvent {
+            success: true,
+            label: format!("New message from {who}"),
+            detail: None,
+        }),
+    });
+}
+
 // ── Notion ────────────────────────────────────────────────────────────────────
 
 async fn poll_notion(app: AppHandle) {
@@ -760,5 +1046,16 @@ fn fmt_value(v: &Value) -> String {
         Value::Array(a) => format!("[{}]", a.len()),
         Value::Object(_) => "{…}".into(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_dm_names_read_like_people() {
+        assert_eq!(slack_group_name("mpdm-alice--bob--carol-1"), "alice, bob, carol");
+        assert_eq!(slack_group_name("mpdm-matt--sam-1"), "matt, sam");
     }
 }

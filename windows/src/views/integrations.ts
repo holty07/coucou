@@ -53,6 +53,7 @@ const OPEN_URLS: Record<string, string> = {
   integration_stripe: "https://dashboard.stripe.com/payments",
   integration_notion: "https://notion.so",
   integration_calcom: "https://app.cal.com/bookings",
+  integration_slack: "https://app.slack.com/client",
 };
 
 function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
@@ -290,6 +291,45 @@ function notionCard(): HTMLElement {
   return h("div", { class: "int-card" }, header("#E8E8E8", "Notion", "Recent"), rows);
 }
 
+// ── Slack ─────────────────────────────────────────────────────────────────────
+
+function slackCard(): HTMLElement {
+  const data = get("integration_slack");
+  const unread = Number(data.unread ?? 0);
+  const checked = Number(data.checked ?? 0);
+  const total = Number(data.total ?? 0);
+  const extra = unread > 0
+    ? h("span", { class: "int-total" }, h("i", { class: "pulse" }), h("span", { text: String(unread) }))
+    : undefined;
+  const rows = h("div", { class: "int-rows tight" });
+  const convos = arr("integration_slack", "conversations");
+  if (convos.length === 0) {
+    // Until every DM has been looked at once, "nothing unread" is a guess.
+    const sweeping = checked < total;
+    rows.append(h("div", {
+      class: "int-row",
+      text: sweeping ? `All caught up so far · checked ${checked}/${total} DMs` : "All caught up — no unread DMs",
+    }));
+  }
+  for (const c of convos.slice(0, 3)) {
+    rows.append(
+      h(
+        "button",
+        {
+          class: "int-page",
+          onclick: () => {
+            if (typeof c.url === "string") void Bridge.openUrl(c.url);
+          },
+        },
+        dot("#36C5F0", 5),
+        h("span", { class: "int-name", text: String(c.name ?? "Someone") }),
+        h("span", { class: "int-ago", text: `${c.count} unread` }),
+      ),
+    );
+  }
+  return h("div", { class: "int-card" }, header("#36C5F0", "Slack", "Direct messages", extra), rows);
+}
+
 // ── Cal.com ───────────────────────────────────────────────────────────────────
 
 function calcomCard(): HTMLElement {
@@ -400,6 +440,8 @@ export function hasIntegrationData(id: string): boolean {
       return arr(id, "pages").length > 0;
     case "integration_calcom":
       return info.loaded;
+    case "integration_slack":
+      return info.loaded;
     default:
       return false;
   }
@@ -428,6 +470,8 @@ export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHoo
       return notionCard();
     case "integration_calcom":
       return calcomCard();
+    case "integration_slack":
+      return slackCard();
     default:
       return idleCard(task, hooks.openSettings);
   }
