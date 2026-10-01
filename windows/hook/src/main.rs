@@ -189,6 +189,8 @@ fn read_event() -> Option<(String, String)> {
         ("wt_session", "WT_SESSION"),
         ("term_session_id", "TERM_SESSION_ID"),
         ("vscode_pid", "VSCODE_PID"),
+        // herdr (herdr.dev) names the pane hosting the session, so "Open" can jump to it.
+        ("herdr_pane_id", "HERDR_PANE_ID"),
         ("session_pid", "CLAUDE_CODE_SSE_PORT"),
     ] {
         if !map.contains_key(key) {

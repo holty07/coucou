@@ -11,6 +11,8 @@ mod island;
 mod log;
 mod pipe;
 #[cfg(target_os = "linux")]
+mod herdr;
+#[cfg(target_os = "linux")]
 mod plasma;
 mod secrets;
 mod settings;
@@ -218,6 +220,30 @@ fn open_in_vscode(path: Option<String>) -> bool {
         let _ = Command::new(browser).arg(p).spawn();
     }
     false
+}
+
+/// "Open" on the Claude Code card: the session's herdr pane when it runs inside
+/// herdr (Linux), otherwise its folder — VS Code on Windows, the file manager
+/// on Linux.
+#[tauri::command]
+fn open_session(path: Option<String>, pane: Option<String>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(pane) = pane.as_deref().filter(|p| !p.is_empty()) {
+            if herdr::open(pane) {
+                return true;
+            }
+        }
+        if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
+            return spawn_quiet(Command::new("xdg-open").arg(p));
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pane;
+        open_in_vscode(path)
+    }
 }
 
 /// Our own `where`: walks %PATH% against %PATHEXT%, no shell involved.
@@ -471,6 +497,7 @@ pub fn run() {
             reposition,
             open_url,
             open_in_vscode,
+            open_session,
             quit_app,
             hooks_status,
             hooks_preview,

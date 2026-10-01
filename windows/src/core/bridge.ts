@@ -65,6 +65,13 @@ export const Bridge = {
   /** "Open terminal" → opens the folder in VS Code when `code` is on PATH. */
   openInVSCode: (path: string | null) => call<boolean>("open_in_vscode", { path }),
 
+  /**
+   * Jumps to the Claude Code session: its herdr pane when it runs inside herdr,
+   * otherwise the folder (VS Code when available).
+   */
+  openSession: (path: string | null, pane: string | null) =>
+    call<boolean>("open_session", { path, pane }),
+
   quit: () => call<void>("quit_app"),
 
   openSettingsWindow: () => call<void>("open_settings_window"),

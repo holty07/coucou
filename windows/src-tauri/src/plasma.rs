@@ -253,6 +253,7 @@ async fn dispatch(app: &AppHandle, cmd: &str, args: Value) -> Result<Value, Stri
         "set_collapsed" | "set_island_rect" | "focus_window" | "reposition" => ok(()),
         "open_url" => ok(crate::open_url(arg(&args, "url")?)),
         "open_in_vscode" => ok(crate::open_in_vscode(arg(&args, "path")?)),
+        "open_session" => ok(crate::open_session(arg(&args, "path")?, arg(&args, "pane")?)),
         "open_settings_window" => ok(crate::show_settings_window(app)),
         "quit_app" => ok(app.exit(0)),
         "log_line" => ok(crate::log_line(arg(&args, "message")?)),

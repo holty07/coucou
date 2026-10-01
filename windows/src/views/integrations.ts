@@ -9,6 +9,8 @@ import { ICONS } from "./icons";
 import { State, type AgentTask } from "../core/state";
 import { Bridge } from "../core/bridge";
 
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+
 /** Same shape as the Swift `timeAgo` computed properties. */
 export function timeAgo(value: unknown): string {
   const date = typeof value === "number" ? new Date(value) : new Date(String(value));
@@ -69,8 +71,8 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
       h("button", {
         class: "link-btn",
         style: `color:${task.color}b3`,
-        text: "Open Visual Studio Code",
-        onclick: () => void Bridge.openInVSCode(task.sessionCwd ?? null),
+        text: task.sessionPane ? "Open in herdr" : IS_WINDOWS ? "Open Visual Studio Code" : "Open folder",
+        onclick: () => void Bridge.openSession(task.sessionCwd ?? null, task.sessionPane ?? null),
       }),
     );
   } else if (task.id === "integration_n8n") {
@@ -110,7 +112,7 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
   return h(
     "div",
     { class: "int-card" },
-    header(task.color, task.id === "integration_claude" ? "VS Code" : task.name, "Integration"),
+    header(task.color, task.id === "integration_claude" ? "Claude Code" : task.name, "Integration"),
     h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
     actions,
   );

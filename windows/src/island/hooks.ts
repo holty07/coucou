@@ -23,6 +23,8 @@ interface HookPayload {
   prompt?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  /** Added by coucou-hook when the session runs inside herdr. */
+  herdr_pane_id?: string;
 }
 
 const PROJECT_ALIASES: Record<string, string> = {
@@ -101,11 +103,13 @@ function approvalTarget(tool: string, input: Record<string, unknown>): string {
   return tool;
 }
 
-function upsert(projectName: string, cwd: string) {
+function upsert(projectName: string, cwd: string, pane: string | null) {
   const t = State.tasks.find((x) => x.id === CLAUDE_ID);
   if (!t) return;
   t.name = projectName;
   if (cwd) t.sessionCwd = cwd;
+  // Every event says where it came from, so a session outside herdr clears it.
+  t.sessionPane = pane;
 }
 
 function clearSession() {
@@ -113,7 +117,7 @@ function clearSession() {
   if (!t) return;
   t.steps = [];
   t.stepIndex = 0;
-  t.name = "VS Code";
+  t.name = "Claude Code";
   t.pillBadge = null;
 }
 
@@ -132,6 +136,7 @@ function handleHook(island: Island, payload: HookPayload) {
 
   const name = payload.hook_event_name ?? "";
   const cwd = payload.cwd ?? "";
+  const pane = payload.herdr_pane_id || null;
   const raw = lastPathComponent(cwd);
   const projectName = aliasProjectName(raw || "Session");
   const focused = State.focusId === CLAUDE_ID;
@@ -149,13 +154,13 @@ function handleHook(island: Island, payload: HookPayload) {
 
   switch (name) {
     case "SessionStart":
-      upsert(projectName, cwd);
+      upsert(projectName, cwd, pane);
       surface("overview", false);
       Sound.play("work");
       break;
 
     case "UserPromptSubmit": {
-      upsert(projectName, cwd);
+      upsert(projectName, cwd, pane);
       State.updateTask(CLAUDE_ID, "thinking");
       // The field is `prompt`; reading `message` meant this step was always blank.
       const asked = payload.prompt ?? payload.message;
@@ -165,7 +170,7 @@ function handleHook(island: Island, payload: HookPayload) {
     }
 
     case "PreToolUse": {
-      upsert(projectName, cwd);
+      upsert(projectName, cwd, pane);
       State.updateTask(CLAUDE_ID, "working");
       const tool = payload.tool_name ?? "Tool";
       State.appendStep(CLAUDE_ID, stepLabel(tool, payload.tool_input ?? {}));
@@ -236,7 +241,7 @@ function handleHook(island: Island, payload: HookPayload) {
         if (requestId) void Bridge.approvalDecline(requestId);
         break;
       }
-      upsert(projectName, cwd);
+      upsert(projectName, cwd, pane);
       if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
       const tool = payload.tool_name ?? "Tool";
       const input = payload.tool_input ?? {};
