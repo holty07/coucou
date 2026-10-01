@@ -75,6 +75,14 @@ export function syncMiniBotStates(tasks: AgentTask[]) {
 export function tickMiniBots(dt: number) {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   for (const mb of live.values()) {
+    // The pixel ratio can change after the canvas was made — another monitor,
+    // or the Plasma widget's page moving from its hidden preload into the popup.
+    // A stale backing store would show the drawing at the wrong scale, clipped.
+    const px = Math.round(mb.cssSize * dpr);
+    if (mb.canvas.width !== px) {
+      mb.canvas.width = px;
+      mb.canvas.height = px;
+    }
     const ctx = mb.canvas.getContext("2d");
     if (!ctx) continue;
     mb.engine.update(dt);

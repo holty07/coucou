@@ -691,6 +691,12 @@ export class Island {
       const gctx = this.greetingCanvas.getContext("2d");
       if (gctx) {
         const dpr = Math.min(2, window.devicePixelRatio || 1);
+        // The pixel ratio can change under us (see drawBot).
+        const gw = Math.round(EXPANDED_W * dpr);
+        if (this.greetingCanvas.width !== gw) {
+          this.greetingCanvas.width = gw;
+          this.greetingCanvas.height = Math.round(150 * dpr);
+        }
         gctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         this.greeting.draw(gctx);
       }
@@ -706,7 +712,7 @@ export class Island {
     this.viewsEl.classList.toggle("hidden-by-upload", uploadActive);
 
     tickMiniBots(dt);
-    this.views.get(State.view)?.tick?.(nowMs);
+    const viewMoving = this.views.get(State.view)?.tick?.(nowMs) ?? false;
     if (UploadSeq.isActive) this.stepSequence();
     this.updateCountdown(nowMs);
 
@@ -722,7 +728,7 @@ export class Island {
       ? settling
       : settling ||
         !this.botCx.settled || !this.botCy.settled || !this.botSize.settled ||
-        greetingActive || this.engine.busy || UploadSeq.isActive;
+        greetingActive || this.engine.busy || UploadSeq.isActive || viewMoving;
 
     if (busy) {
       requestAnimationFrame(this.frame);
@@ -763,7 +769,10 @@ export class Island {
     const w = Math.max(1, Math.round(size));
     const hCss = w + BOT_OVERHANG;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    if (this.canvasPx !== w) {
+    // Resized for the pixel ratio too: it changes when the window moves to
+    // another monitor, or when the Plasma widget's page leaves its hidden
+    // preload for the popup.
+    if (this.canvasPx !== w || this.botCanvas.width !== Math.round(w * dpr)) {
       this.canvasPx = w;
       this.botCanvas.width = Math.round(w * dpr);
       this.botCanvas.height = Math.round(hCss * dpr);

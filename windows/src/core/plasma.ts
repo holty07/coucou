@@ -16,8 +16,20 @@ export type PlasmaHostMode = "panel" | "desktop";
 const query = new URLSearchParams(location.search);
 const fragment = new URLSearchParams(location.hash.slice(1));
 
-const WS_URL = fragment.get("ws");
-const TOKEN = fragment.get("token");
+// Kept for the life of this view: the fragment is wiped from the address below,
+// and a reload (a renderer restart) must still find its way back.
+function remembered(key: string): string | null {
+  const fresh = fragment.get(key);
+  try {
+    if (fresh) sessionStorage.setItem(`coucou-${key}`, fresh);
+    return fresh ?? sessionStorage.getItem(`coucou-${key}`);
+  } catch {
+    return fresh;
+  }
+}
+
+const WS_URL = remembered("ws");
+const TOKEN = remembered("token");
 
 export const IS_PLASMA =
   typeof window !== "undefined" &&
