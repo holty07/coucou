@@ -1,0 +1,314 @@
+// Coucou for KDE Plasma.
+//
+// The app (the Rust/Tauri `coucou` binary) runs in the background and owns
+// everything that matters: the Claude Code relay, the keys, the integrations.
+// This widget is only the island's window. It renders the very same front end
+// in a QtWebEngine view, served by the app on 127.0.0.1 and driven over a
+// token-protected WebSocket (see windows/src-tauri/src/plasma.rs).
+//
+// On the desktop the widget is the island itself. In a panel it shows a small
+// Mochi, and the island opens in its popup.
+
+import QtQuick
+import QtQuick.Layouts
+import QtWebEngine
+import org.kde.plasma.plasmoid
+import org.kde.plasma.core as PlasmaCore
+import org.kde.plasma.components as PlasmaComponents
+import org.kde.plasma.plasma5support as P5Support
+import org.kde.kirigami as Kirigami
+
+PlasmoidItem {
+    id: root
+
+    readonly property bool inPanel: Plasmoid.formFactor === PlasmaCore.Types.Horizontal
+        || Plasmoid.formFactor === PlasmaCore.Types.Vertical
+
+    /** Where the page and the socket are, from $XDG_RUNTIME_DIR/coucou/plasma.json. */
+    property var conn: null
+    property bool connected: false
+
+    // Mirrored from the page, for the panel Mochi and the popup size.
+    property string botState: "idle"
+    property color botColor: "#FFFFFF"
+    property string islandMode: "hidden"
+    property int islandHeight: 160
+    property bool paused: false
+
+    readonly property string pageUrl: conn
+        ? conn.page + "/index.html?host=" + (inPanel ? "panel" : "desktop")
+            + "#ws=" + encodeURIComponent(conn.ws) + "&token=" + conn.token
+        : ""
+
+    preferredRepresentation: inPanel ? compactRepresentation : fullRepresentation
+    // The page must be alive even while the popup is shut: it is what hears
+    // Claude Code and decides when to open.
+    preloadFullRepresentation: true
+    Plasmoid.backgroundHints: inPanel
+        ? PlasmaCore.Types.DefaultBackground
+        : PlasmaCore.Types.NoBackground | PlasmaCore.Types.ConfigurableBackground
+
+    toolTipMainText: "Coucou"
+    toolTipSubText: !connected ? i18n("Coucou isn't running")
+        : paused ? i18n("Paused")
+        : botState === "idle" ? i18n("Watching Claude Code") : botState
+
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: i18n("Coucou Settings…")
+            icon.name: "configure"
+            enabled: root.connected
+            onTriggered: root.sendCommand("open_settings_window")
+        },
+        PlasmaCore.Action {
+            text: root.connected ? i18n("Reload") : i18n("Start Coucou")
+            icon.name: root.connected ? "view-refresh" : "media-playback-start"
+            onTriggered: root.connected ? root.reload() : root.startApp()
+        }
+    ]
+
+    // ── Finding the app ─────────────────────────────────────────────────────
+
+    P5Support.DataSource {
+        id: exec
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            disconnectSource(source);
+            if (source === root.readCmd) root.gotConnection(data["stdout"] || "");
+        }
+        function run(cmd) {
+            connectSource(cmd);
+        }
+    }
+
+    // Prints the connection file only while the process that wrote it is alive,
+    // so a stale file from a crashed app reads as "not running".
+    readonly property string readCmd: "f=\"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/coucou/plasma.json\"; "
+        + "p=$(grep -o '\"pid\":[0-9]*' \"$f\" 2>/dev/null | cut -d: -f2); "
+        + "[ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && cat \"$f\""
+
+    function gotConnection(text) {
+        let next = null;
+        try {
+            next = text.trim() ? JSON.parse(text) : null;
+        } catch (e) {
+            next = null;
+        }
+        if (!next || !next.page || !next.ws || !next.token) {
+            if (conn) conn = null;
+            connected = false;
+            return;
+        }
+        if (!conn || conn.token !== next.token || conn.page !== next.page) {
+            connected = false;
+            conn = next;
+        }
+    }
+
+    Timer {
+        // Fast while we wait for the app, slow once it is there (just to notice
+        // it went away without a goodbye).
+        interval: root.connected ? 10000 : 2000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: exec.run(root.readCmd)
+    }
+
+    function startApp() {
+        exec.run("command -v coucou >/dev/null 2>&1 && setsid -f coucou >/dev/null 2>&1 "
+            + "|| setsid -f \"$HOME/.local/bin/coucou\" >/dev/null 2>&1");
+    }
+
+    function reload() {
+        conn = null;
+        connected = false;
+        exec.run(readCmd);
+    }
+
+    // ── Page ⇄ widget ───────────────────────────────────────────────────────
+
+    property var web: null
+
+    function toPage(msg) {
+        if (web && connected)
+            web.runJavaScript("window.coucouHost && window.coucouHost.receive(" + JSON.stringify(msg) + ")");
+    }
+
+    /** A command the widget itself issues (the context menu), sent through the page. */
+    function sendCommand(cmd) {
+        if (web && connected)
+            web.runJavaScript("window.coucouHost && window.coucouHost.receive("
+                + JSON.stringify({ type: "command", payload: cmd }) + ")");
+    }
+
+    function fromPage(msg) {
+        switch (msg.type) {
+        case "connected":
+            connected = true;
+            break;
+        case "disconnected":
+            connected = false;
+            conn = null;
+            break;
+        case "expand":
+            if (inPanel) root.expanded = true;
+            break;
+        case "collapse":
+            if (inPanel) root.expanded = false;
+            break;
+        case "state":
+            botState = msg.payload.bot;
+            botColor = msg.payload.color;
+            islandMode = msg.payload.mode;
+            paused = msg.payload.paused;
+            if (msg.payload.size && msg.payload.size.h > 0) islandHeight = msg.payload.size.h;
+            break;
+        }
+    }
+
+    onExpandedChanged: {
+        if (inPanel) toPage({ type: expanded ? "open" : "close" });
+    }
+
+    // ── Panel: the small Mochi ──────────────────────────────────────────────
+
+    compactRepresentation: MouseArea {
+        id: compact
+        Layout.minimumWidth: root.inPanel ? Kirigami.Units.iconSizes.medium : -1
+        Layout.preferredWidth: Plasmoid.formFactor === PlasmaCore.Types.Vertical ? -1 : height
+        hoverEnabled: true
+        acceptedButtons: Qt.LeftButton
+        onClicked: {
+            if (!root.connected) root.startApp();
+            else root.expanded = !root.expanded;
+        }
+
+        PanelMochi {
+            anchors.centerIn: parent
+            width: Math.min(parent.width, parent.height) * 0.8
+            height: width
+            mood: root.botState
+            glow: root.botColor
+            awake: root.connected && !root.paused
+            hovered: compact.containsMouse
+        }
+
+        // Dragging a file onto the panel Mochi opens the island to drop it into.
+        DropArea {
+            anchors.fill: parent
+            keys: ["text/uri-list"]
+            onEntered: (drag) => {
+                if (root.connected) root.expanded = true;
+            }
+        }
+    }
+
+    // ── The island ──────────────────────────────────────────────────────────
+
+    fullRepresentation: Item {
+        // The page lays the island out in a fixed 720×320 window, glued to the
+        // top edge and centred, exactly like the Windows and macOS panels.
+        Layout.preferredWidth: 720
+        Layout.preferredHeight: root.inPanel ? Math.min(320, root.islandHeight + 48) : 320
+        Layout.minimumWidth: root.inPanel ? 720 : 300
+        Layout.minimumHeight: root.inPanel ? 120 : 60
+
+        WebEngineView {
+            id: view
+            anchors.fill: parent
+            visible: root.connected
+            backgroundColor: "transparent"
+            url: root.pageUrl
+            settings.playbackRequiresUserGesture: false
+            settings.showScrollBars: false
+            settings.javascriptCanOpenWindows: false
+            settings.localContentCanAccessFileUrls: false
+            settings.localStorageEnabled: true
+            Component.onCompleted: root.web = view
+
+            onJavaScriptConsoleMessage: (level, message, lineNumber, sourceID) => {
+                const prefix = "coucou-host:";
+                if (!message.startsWith(prefix)) return;
+                try {
+                    root.fromPage(JSON.parse(message.slice(prefix.length)));
+                } catch (e) {
+                    console.warn("coucou: bad host message", e);
+                }
+            }
+
+            // Links never navigate the island away: they go to the real browser.
+            onNavigationRequested: (request) => {
+                if (root.conn && request.url.toString().startsWith(root.conn.page)) return;
+                request.reject();
+                Qt.openUrlExternally(request.url);
+            }
+            onNewWindowRequested: (request) => Qt.openUrlExternally(request.requestedUrl)
+            onContextMenuRequested: (request) => { request.accepted = true; }
+
+            onLoadingChanged: (info) => {
+                if (info.status === WebEngineView.LoadFailedStatus) root.reload();
+            }
+
+            // A click is how the chat field gets the keyboard on the desktop.
+            TapHandler {
+                gesturePolicy: TapHandler.WithinBounds
+                grabPermissions: PointerHandler.ApprovesTakeOverByAnything
+                onPressedChanged: if (pressed) view.forceActiveFocus()
+            }
+        }
+
+        // Files dragged onto the island. Captured here, so QtWebEngine's own drop
+        // handling never sees them, and handed to the page with real paths.
+        DropArea {
+            anchors.fill: parent
+            keys: ["text/uri-list"]
+            enabled: root.connected
+            onEntered: (drag) => {
+                drag.accept(Qt.CopyAction);
+                root.toPage({ type: "cursor", payload: { x: drag.x, y: drag.y } });
+                root.toPage({ type: "drag", payload: { type: "enter" } });
+            }
+            onPositionChanged: (drag) => {
+                root.toPage({ type: "cursor", payload: { x: drag.x, y: drag.y } });
+                root.toPage({ type: "drag", payload: { type: "over" } });
+            }
+            onExited: root.toPage({ type: "drag", payload: { type: "leave" } })
+            onDropped: (drop) => {
+                const paths = [];
+                for (const u of drop.urls) {
+                    const s = u.toString();
+                    if (s.startsWith("file://")) paths.push(decodeURIComponent(s.slice(7)));
+                }
+                drop.accept(Qt.CopyAction);
+                root.toPage({ type: "drag", payload: { type: "drop", paths: paths } });
+            }
+        }
+
+        // The app is not running.
+        ColumnLayout {
+            anchors.centerIn: parent
+            visible: !root.connected
+            spacing: Kirigami.Units.smallSpacing
+
+            PanelMochi {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredWidth: Kirigami.Units.iconSizes.huge
+                Layout.preferredHeight: Kirigami.Units.iconSizes.huge
+                mood: "sleeping"
+                awake: false
+            }
+            PlasmaComponents.Label {
+                Layout.alignment: Qt.AlignHCenter
+                text: i18n("Coucou isn't running")
+            }
+            PlasmaComponents.Button {
+                Layout.alignment: Qt.AlignHCenter
+                text: i18n("Start Coucou")
+                icon.name: "media-playback-start"
+                onClicked: root.startApp()
+            }
+        }
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "KPlugin": {
+        "Id": "io.github.holty07.coucou",
+        "Name": "Coucou",
+        "Description": "Mochi keeps an eye on your Claude Code sessions — in your panel or on your desktop.",
+        "Category": "Utilities",
+        "Icon": "face-smile",
+        "License": "MIT",
+        "Version": "0.1.1",
+        "Authors": [{ "Name": "holty07" }],
+        "FormFactors": ["desktop", "panel"]
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

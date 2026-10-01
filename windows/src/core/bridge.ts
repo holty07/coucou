@@ -1,19 +1,29 @@
 // Thin wrapper over the Tauri commands/events. Every call is a no-op when the
 // page is opened in a plain browser, so the island can be iterated on with
 // `npm run dev` alone.
+//
+// Inside the KDE Plasma widget the page is not a Tauri webview: the same calls
+// and events travel over the app's WebSocket instead (see core/plasma.ts).
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { IS_PLASMA, Plasma } from "./plasma";
 import type { Settings } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+export { IS_PLASMA };
+
+function transport<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  return IS_PLASMA ? Plasma.call<T>(cmd, args) : invoke<T>(cmd, args);
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
-  if (!IS_TAURI) return null;
+  if (!IS_TAURI && !IS_PLASMA) return null;
   try {
-    return await invoke<T>(cmd, args);
+    return await transport<T>(cmd, args);
   } catch (err) {
     console.error(`[coucou] ${cmd} failed`, err);
     return null;
@@ -133,8 +143,8 @@ export interface HookPreview {
 
 /** Same as `call`, but surfaces the error so the UI can show what went wrong. */
 async function callOrThrow<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (!IS_TAURI) throw new Error("not running inside Coucou");
-  return invoke<T>(cmd, args);
+  if (!IS_TAURI && !IS_PLASMA) throw new Error("not running inside Coucou");
+  return transport<T>(cmd, args);
 }
 
 export type BridgeEvent =
@@ -150,6 +160,7 @@ export interface DragDropPayload {
 
 /** Files dragged onto the island. Only reaches us when the window takes the mouse. */
 export async function onDragDrop(handler: (e: DragDropPayload) => void) {
+  if (IS_PLASMA) return Plasma.onDragDrop(handler);
   if (!IS_TAURI) return () => {};
   return getCurrentWebview().onDragDropEvent((event) => {
     handler(event.payload as DragDropPayload);
@@ -157,6 +168,7 @@ export async function onDragDrop(handler: (e: DragDropPayload) => void) {
 }
 
 export async function onEvent<T>(name: string, handler: (payload: T) => void) {
+  if (IS_PLASMA) return Plasma.listen<T>(name, handler);
   if (!IS_TAURI) return () => {};
   return listen<T>(name, (e) => handler(e.payload));
 }

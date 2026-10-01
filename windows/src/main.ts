@@ -1,12 +1,13 @@
 // Entry point: boot the bridge, wire the island, start the greeting.
 
 import "./style.css";
-import { Bridge, IS_TAURI, onEvent } from "./core/bridge";
+import { Bridge, IS_PLASMA, IS_TAURI, onEvent } from "./core/bridge";
 import { Sound } from "./core/sound";
 import { State, type Settings } from "./core/state";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
+import { installPlasmaHost } from "./island/plasmaHost";
 
 async function main() {
   const root = document.getElementById("root");
@@ -62,6 +63,7 @@ async function main() {
 
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
+  if (IS_PLASMA) installPlasmaHost(island);
 
   island.launch();
 

@@ -1,5 +1,6 @@
-// Preferences, stored as plain JSON in %APPDATA%\Coucou\settings.json.
-// No secret ever lands here — API keys live in the Windows Credential Manager.
+// Preferences, stored as plain JSON in %APPDATA%\Coucou\settings.json
+// (Linux: ~/.config/coucou/settings.json). No secret ever lands here — API keys
+// live in the Windows Credential Manager or the Secret Service.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -48,6 +49,7 @@ impl Default for Settings {
 }
 
 /// %APPDATA%\Coucou
+#[cfg(windows)]
 pub fn config_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -56,6 +58,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// %LOCALAPPDATA%\Coucou — where coucou-hook.exe and the log live.
+#[cfg(windows)]
 pub fn local_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -63,8 +66,35 @@ pub fn local_dir() -> PathBuf {
     base.join("Coucou")
 }
 
+/// $XDG_CONFIG_HOME/coucou, usually ~/.config/coucou
+#[cfg(not(windows))]
+pub fn config_dir() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", ".config").join("coucou")
+}
+
+/// $XDG_DATA_HOME/coucou, usually ~/.local/share/coucou — where coucou-hook,
+/// the inbox and the log live.
+#[cfg(not(windows))]
+pub fn local_dir() -> PathBuf {
+    xdg_dir("XDG_DATA_HOME", ".local/share").join("coucou")
+}
+
+#[cfg(not(windows))]
+fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os(var).filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(fallback)
+}
+
+/// File name of the relay, both in the bundle and once installed.
+pub const HOOK_BIN: &str = if cfg!(windows) { "coucou-hook.exe" } else { "coucou-hook" };
+
 pub fn hook_exe_path() -> PathBuf {
-    local_dir().join("bin").join("coucou-hook.exe")
+    local_dir().join("bin").join(HOOK_BIN)
 }
 
 fn settings_path() -> PathBuf {

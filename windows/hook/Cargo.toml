@@ -21,3 +21,7 @@ windows = { version = "0.61", features = [
   "Win32_System_Pipes",
   "Win32_System_Threading",
 ] }
+
+# Linux: just enough libc to check who is on the other end of the socket.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,7 +1,8 @@
 //! coucou-hook — the relay Claude Code runs on every hook event.
 //!
 //! Reads the hook JSON on stdin, adds a little terminal context, and hands it to
-//! Coucou over the named pipe `\\.\pipe\coucou-<sid>`.
+//! Coucou over the named pipe `\\.\pipe\coucou-<sid>` (Windows) or the Unix
+//! socket `$XDG_RUNTIME_DIR/coucou/hook.sock` (Linux).
 //!
 //! Hard rule (docs/CLAUDE.md): **never block Claude Code.**
 //! * If the pipe does not exist — Coucou is closed — we exit 0 immediately with
@@ -17,7 +18,9 @@
 
 use std::io::{Read, Write};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 /// Budget for getting a pipe connection. Beyond this Claude Code wins, always.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
@@ -28,6 +31,7 @@ const DECISION_BUDGET: Duration = Duration::from_secs(110);
 
 /// `ERROR_PIPE_BUSY` — every instance is serving someone else right now. This is
 /// the one error worth retrying: the server exists and a slot will free up.
+#[cfg(windows)]
 const ERROR_PIPE_BUSY: i32 = 231;
 
 /// Fields that are pointless to forward and can be enormous (a whole file read,
@@ -37,11 +41,15 @@ const DROPPED_FIELDS: &[&str] = &["tool_response", "transcript_path"];
 /// less than this anyway.
 const MAX_FIELD_LEN: usize = 2_000;
 
+#[cfg(windows)]
 mod win;
+#[cfg(unix)]
+mod unix;
 
 /// `\\.\pipe\coucou-<sid>`. The SID keeps two accounts on the same machine from
 /// ever meeting on the same pipe; the name falls back to the user name only if
 /// the SID cannot be read at all, which should not happen.
+#[cfg(windows)]
 fn pipe_path() -> String {
     let key = win::current_user_sid()
         .unwrap_or_else(|| std::env::var("USERNAME").unwrap_or_else(|_| "user".into()));
@@ -50,6 +58,7 @@ fn pipe_path() -> String {
 
 /// Opens the pipe. Retries only while the server is busy: any other error means
 /// there is nothing to talk to, and waiting would only delay Claude Code.
+#[cfg(windows)]
 fn connect() -> Option<std::fs::File> {
     use std::os::windows::io::AsRawHandle;
     let path = pipe_path();
@@ -69,6 +78,18 @@ fn connect() -> Option<std::fs::File> {
             }
         }
     }
+}
+
+/// Opens the socket. A Unix socket either answers at once or does not exist, so
+/// there is nothing to retry: no socket, or nobody listening, means Coucou is
+/// closed and Claude Code carries on.
+#[cfg(unix)]
+fn connect() -> Option<std::os::unix::net::UnixStream> {
+    use std::os::fd::AsRawFd;
+    let stream = std::os::unix::net::UnixStream::connect(unix::socket_path()).ok()?;
+    let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
+    // Somebody else's server on our socket gets nothing from us.
+    unix::peer_is_same_user(stream.as_raw_fd()).then_some(stream)
 }
 
 fn main() {

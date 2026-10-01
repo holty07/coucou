@@ -19,8 +19,10 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 windows = { version = "0.61", features = [
   "Win32_Foundation",
@@ -32,3 +34,10 @@ windows = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Linux: keys go to the Secret Service (KWallet / GNOME Keyring), and the Plasma
+# widget reaches the app over a token-protected WebSocket on 127.0.0.1.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+libc = "0.2"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "query"] }

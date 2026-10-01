@@ -1,17 +1,23 @@
-// Coucou for Windows — app wiring and the commands the island calls.
+// Coucou for Windows and Linux — app wiring and the commands the island calls.
 
 mod claude;
+mod clock;
 mod files;
 mod hooks;
 mod integrations;
+#[cfg_attr(not(windows), path = "island_linux.rs")]
 mod island;
 mod log;
 mod pipe;
+#[cfg(target_os = "linux")]
+mod plasma;
 mod secrets;
 mod settings;
 mod tray;
+#[cfg(windows)]
 mod win_user;
 
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -29,7 +35,62 @@ use pipe::Pending;
 use settings::Settings;
 
 /// Keeps spawned helpers from flashing a console window.
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Spawns a helper without a console window on Windows; a plain spawn elsewhere.
+fn spawn_quiet(cmd: &mut Command) -> bool {
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.spawn().is_ok()
+}
+
+/// Sends an event to the island: the island window on Windows, the connected
+/// Plasma widgets on Linux.
+pub fn emit_island<T: Serialize>(app: &AppHandle, event: &str, payload: T) {
+    let Ok(value) = serde_json::to_value(payload) else { return };
+    #[cfg(target_os = "linux")]
+    plasma::broadcast(event, &value);
+    let _ = app.emit_to(island::WINDOW_LABEL, event, value);
+}
+
+/// Same as `emit_island`, but for every window (island and settings).
+pub fn emit_all<T: Serialize>(app: &AppHandle, event: &str, payload: T) {
+    let Ok(value) = serde_json::to_value(payload) else { return };
+    #[cfg(target_os = "linux")]
+    plasma::broadcast(event, &value);
+    let _ = app.emit(event, value);
+}
+
+/// `$XDG_RUNTIME_DIR/coucou`: the relay socket and the widget's connection file.
+/// Must match coucou-hook's `runtime_dir()`.
+#[cfg(unix)]
+pub fn runtime_dir() -> std::path::PathBuf {
+    let uid = unsafe { libc::getuid() };
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        return std::path::PathBuf::from(dir).join("coucou");
+    }
+    let run = std::path::PathBuf::from(format!("/run/user/{uid}"));
+    if run.is_dir() {
+        return run.join("coucou");
+    }
+    std::path::PathBuf::from(format!("/tmp/coucou-{uid}"))
+}
+
+/// Creates `dir` readable by us only, and refuses one somebody else owns.
+#[cfg(unix)]
+pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::getuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "not a directory we own",
+        ));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
 
 pub struct Shared {
     pub settings: Mutex<Settings>,
@@ -83,7 +144,7 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         island::apply_geometry(&app, &settings.screen, collapsed);
     }
     // Keep the other window in step (island ⇄ settings window).
-    let _ = app.emit("settings-changed", settings);
+    emit_all(&app, "settings-changed", settings);
 }
 
 /// Hidden island → shrink the window to the invisible wake strip and park the
@@ -126,10 +187,10 @@ fn open_url(url: String) {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return;
     }
-    let _ = Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    #[cfg(windows)]
+    spawn_quiet(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", &url]));
+    #[cfg(not(windows))]
+    spawn_quiet(Command::new("xdg-open").arg(&url));
 }
 
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
@@ -145,12 +206,13 @@ fn open_in_vscode(path: Option<String>) -> bool {
         if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
             cmd.arg(p);
         }
-        if cmd.creation_flags(CREATE_NO_WINDOW).spawn().is_ok() {
+        if spawn_quiet(&mut cmd) {
             return true;
         }
     }
     if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
-        let _ = Command::new("explorer").arg(p).spawn();
+        let browser = if cfg!(windows) { "explorer" } else { "xdg-open" };
+        let _ = Command::new(browser).arg(p).spawn();
     }
     false
 }
@@ -158,6 +220,7 @@ fn open_in_vscode(path: Option<String>) -> bool {
 /// Our own `where`: walks %PATH% against %PATHEXT%, no shell involved.
 /// Rust quotes arguments correctly for `.cmd`/`.bat` targets since 1.77, so
 /// spawning `code.cmd` directly is safe.
+#[cfg(windows)]
 fn find_on_path(stem: &str) -> Option<std::path::PathBuf> {
     let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
     let dirs = std::env::var_os("PATH")?;
@@ -170,6 +233,16 @@ fn find_on_path(stem: &str) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Our own `which`: the first executable `stem` on $PATH, no shell involved.
+#[cfg(not(windows))]
+fn find_on_path(stem: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dirs = std::env::var_os("PATH")?;
+    std::env::split_paths(&dirs).map(|d| d.join(stem)).find(|p| {
+        std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    })
 }
 
 #[tauri::command]
@@ -214,7 +287,7 @@ fn hooks_apply(
         let _ = settings::save(&current);
         current.clone()
     };
-    let _ = app.emit("settings-changed", updated);
+    emit_all(&app, "settings-changed", updated);
     Ok(backup)
 }
 
@@ -306,6 +379,7 @@ fn log_line(message: String) {
 /// for the *same* arguments as the island (see `additionalBrowserArgs` in
 /// tauri.conf.json) — a mismatch makes the second window come up blank, with no
 /// error anywhere.
+#[cfg(windows)]
 const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
 
 /// In a dev build the pages are served by Vite, so the second window needs the
@@ -326,8 +400,10 @@ fn settings_page_url(app: &AppHandle) -> WebviewUrl {
 /// one that exists before the island's webview does.
 fn create_settings_window(app: &AppHandle) {
     let url = settings_page_url(app);
-    match WebviewWindowBuilder::new(app, "settings", url)
-        .additional_browser_args(BROWSER_ARGS)
+    let builder = WebviewWindowBuilder::new(app, "settings", url);
+    #[cfg(windows)]
+    let builder = builder.additional_browser_args(BROWSER_ARGS);
+    match builder
         .title("Settings — Coucou")
         .inner_size(560.0, 680.0)
         .min_inner_size(460.0, 480.0)
@@ -371,7 +447,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
+            emit_island(app, "tray", "open".to_string());
         }))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .manage(Shared {
@@ -426,6 +502,8 @@ pub fn run() {
             log::line(format!("--- Coucou {} started ---", env!("CARGO_PKG_VERSION")));
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
+            #[cfg(target_os = "linux")]
+            plasma::start(handle.clone());
             integrations::start(handle.clone());
             Ok(())
         })
