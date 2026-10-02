@@ -264,9 +264,11 @@ PlasmoidItem {
         // The page lays the island out in a fixed 720×320 window, glued to the
         // top edge and centred, exactly like the Windows and macOS panels.
         Layout.preferredWidth: 720
-        Layout.preferredHeight: root.inPanel ? Math.min(320, root.islandHeight + 48) : 320
+        // In the popup: exactly the expanded island plus a margin, never less.
+        readonly property real popupHeight: Math.min(320, root.islandHeight + 24)
+        Layout.preferredHeight: root.inPanel ? popupHeight : 320
         Layout.minimumWidth: root.inPanel ? 720 : 300
-        Layout.minimumHeight: root.inPanel ? 120 : 60
+        Layout.minimumHeight: root.inPanel ? popupHeight : 60
 
         WebEngineView {
             id: view

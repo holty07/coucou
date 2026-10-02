@@ -124,7 +124,10 @@ export function installPlasmaHost(island: Island) {
       id: t.id, name: t.name, color: t.color, state: wanting.get(t.id) ?? t.state,
     }));
     const state = attention[0]?.state ?? State.effectiveState;
-    const size = islandSize(State.mode, State.view, State.chatHistory.length);
+    // The popup is sized for the expanded island it is about to show, whatever
+    // the island happens to be while it is shut (compact is 32 px tall).
+    const view = State.view === "greeting" ? "overview" : State.view;
+    const size = islandSize("expanded", view, State.chatHistory.length);
     const key = `${state}|${State.mode}|${size.w}x${size.h}|${State.paused}|${JSON.stringify(attention)}|${JSON.stringify(tasks)}`;
     if (key === last) return;
     last = key;
