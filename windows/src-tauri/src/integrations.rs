@@ -483,6 +483,8 @@ struct SlackState {
     /// Every DM has been checked once. Until then unread messages are ones the
     /// user already had, not news: fill the card, make no sound.
     swept_once: bool,
+    /// DMs Slack lists but won't let us read; never asked about again.
+    unreadable: std::collections::HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -500,6 +502,9 @@ static SLACK: std::sync::LazyLock<tokio::sync::Mutex<SlackState>> =
 enum SlackError {
     /// Show this on the card.
     Report(String),
+    /// This one conversation can't be read (a Slack Connect DM, a deactivated
+    /// user…). Skip it; it says nothing about the token.
+    Conversation,
     /// Rate limited or a network blip: try again next poll, say nothing.
     Quiet,
 }
@@ -511,8 +516,18 @@ async fn slack_call(token: &str, method: &str, query: &[(&str, &str)]) -> Result
         .query(query)
         .send()
         .await
-        .map_err(|_| SlackError::Quiet)?;
+        .map_err(|e| {
+            log::line(format!("slack: {method} failed: {e}"));
+            SlackError::Quiet
+        })?;
     if response.status().as_u16() == 429 {
+        let wait = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+        log::line(format!("slack: {method} rate limited, retry after {wait}s"));
         return Err(SlackError::Quiet);
     }
     let json: Value = response.json().await.map_err(|_| SlackError::Quiet)?;
@@ -522,6 +537,8 @@ async fn slack_call(token: &str, method: &str, query: &[(&str, &str)]) -> Result
     let err = json.get("error").and_then(Value::as_str).unwrap_or("unknown_error");
     Err(match err {
         "ratelimited" => SlackError::Quiet,
+        "channel_not_found" | "not_in_channel" | "is_archived" | "method_not_supported_for_channel_type"
+        | "user_not_found" | "user_not_visible" => SlackError::Conversation,
         "invalid_auth" | "not_authed" | "token_revoked" | "token_expired" | "account_inactive" => {
             SlackError::Report("Invalid token".into())
         }
@@ -623,14 +640,19 @@ async fn poll_slack(app: AppHandle) {
         match slack_call(&token, "auth.test", &[]).await {
             Ok(v) => state.team = v.get("team_id").and_then(Value::as_str).unwrap_or_default().to_string(),
             Err(SlackError::Report(m)) => return report(&app, m),
-            Err(SlackError::Quiet) => return,
+            Err(SlackError::Quiet | SlackError::Conversation) => return,
         }
     }
     if state.dms.is_empty() || state.polls % SLACK_LIST_EVERY == 0 {
         match slack_list_dms(&token).await {
-            Ok(dms) => state.dms = dms,
+            Ok(dms) => {
+                // Conversations that turned out to be unreadable stay out.
+                let skip = std::mem::take(&mut state.unreadable);
+                state.dms = dms.into_iter().filter(|d| !skip.contains(&d.id)).collect();
+                state.unreadable = skip;
+            }
             Err(SlackError::Report(m)) => return report(&app, m),
-            Err(SlackError::Quiet) => {}
+            Err(SlackError::Quiet | SlackError::Conversation) => {}
         }
     }
     state.polls = state.polls.wrapping_add(1);
@@ -661,6 +683,12 @@ async fn poll_slack(app: AppHandle) {
         let info = match slack_call(&token, "conversations.info", &[("channel", dm.id.as_str())]).await {
             Ok(v) => v,
             Err(SlackError::Report(m)) => return report(&app, m),
+            Err(SlackError::Conversation) => {
+                log::line(format!("slack: skipping unreadable conversation {}", dm.id));
+                state.unreadable.insert(dm.id.clone());
+                state.unread.remove(&dm.id);
+                continue;
+            }
             // Rate limited mid-poll: keep what we have and carry on next time.
             Err(SlackError::Quiet) => break,
         };
@@ -691,6 +719,11 @@ async fn poll_slack(app: AppHandle) {
         } else {
             state.seen_latest.remove(&dm.id);
         }
+    }
+
+    if !state.unreadable.is_empty() {
+        let skip = state.unreadable.clone();
+        state.dms.retain(|d| !skip.contains(&d.id));
     }
 
     // The card: total and the top few senders.
