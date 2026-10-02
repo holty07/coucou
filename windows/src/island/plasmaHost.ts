@@ -16,6 +16,12 @@ import { State } from "../core/state";
 import type { AgentTask } from "../core/state";
 import type { Island } from "./island";
 
+/**
+ * Pills whose state is always live, so it is never kept "until seen": Slack is
+ * curious exactly while DMs are unread, and stops the moment they're read.
+ */
+const LIVE_STATE: ReadonlySet<string> = new Set(["integration_slack"]);
+
 /** States that mean "this Mochi wants you", most urgent first. */
 const URGENCY: Partial<Record<BotStateName, number>> = { approval: 4, question: 3, error: 2, finished: 1 };
 
@@ -68,9 +74,16 @@ export function installPlasmaHost(island: Island) {
         Plasma.post({ type: "collapse" });
       }
     };
+    // Another panel's popup was opened (or this one's): it has all been seen.
+    void onEvent<null>("attention-seen", () => {
+      if (unseen.size === 0) return;
+      unseen.clear();
+      State.notify();
+    });
     Plasma.onHost("open", () => {
       popupOpen = true;
       unseen.clear();
+      void Bridge.attentionSeen();
       if (island.fsm.state !== "home") island.alert(State.defaultView());
       State.notify();
     });
@@ -101,7 +114,7 @@ export function installPlasmaHost(island: Island) {
       const s = urgencyOf(t);
       if (!s) continue;
       wanting.set(t.id, s);
-      if (!popupOpen && HOST_MODE === "panel") {
+      if (!popupOpen && HOST_MODE === "panel" && !LIVE_STATE.has(t.id)) {
         const prev = unseen.get(t.id);
         if (!prev || (URGENCY[s] ?? 0) > (URGENCY[prev] ?? 0)) unseen.set(t.id, s);
       }

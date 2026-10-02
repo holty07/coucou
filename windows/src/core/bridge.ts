@@ -114,6 +114,9 @@ export const Bridge = {
   /** Opens the configured n8n instance in the browser. */
   openN8n: () => call<void>("open_n8n"),
 
+  /** Plasma panel: a popup was opened, so every panel may stop asking for attention. */
+  attentionSeen: () => call<void>("attention_seen"),
+
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 };

@@ -102,8 +102,22 @@ struct Ctx {
     csp: String,
 }
 
+/// The latest update per integration, handed to a widget as it connects so a
+/// panel that loads late doesn't sit idle until the next poll (GitHub's is 5 min).
+static LATEST: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// Forwards an island event to every connected widget.
 pub fn broadcast(event: &str, payload: &Value) {
+    if event == "integration" {
+        if let Some(id) = payload.get("id").and_then(Value::as_str) {
+            // Without the one-off event: a late joiner gets the state, not the news.
+            let mut replay = payload.clone();
+            replay["event"] = Value::Null;
+            let text = json!({ "event": event, "payload": replay }).to_string();
+            LATEST.lock().unwrap().insert(id.to_string(), text);
+        }
+    }
     if let Some(tx) = EVENTS.get() {
         if tx.receiver_count() > 0 {
             let _ = tx.send(json!({ "event": event, "payload": payload }).to_string());
@@ -253,6 +267,12 @@ async fn session(app: AppHandle, mut socket: WebSocket) {
     let (reply_tx, mut replies) = mpsc::channel::<String>(32);
     let client = NEXT_CLIENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     log::line("plasma: widget connected");
+    let catch_up: Vec<String> = LATEST.lock().unwrap().values().cloned().collect();
+    for text in catch_up {
+        if socket.send(Message::Text(text.into())).await.is_err() {
+            return;
+        }
+    }
 
     loop {
         tokio::select! {
@@ -344,6 +364,12 @@ async fn dispatch(app: &AppHandle, client: u64, cmd: &str, args: Value) -> Resul
         }
         "open_n8n" => ok(crate::open_n8n()),
         "set_paused" => ok(crate::set_paused(arg(&args, "paused")?)),
+        // One widget's popup was opened: everything that wanted attention has
+        // been seen, on every panel (one widget per monitor, say).
+        "attention_seen" => {
+            broadcast("attention-seen", &Value::Null);
+            ok(())
+        }
         _ => Err(format!("unknown command {cmd}")),
     }
 }

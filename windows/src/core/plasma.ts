@@ -54,6 +54,11 @@ class PlasmaConnection {
   private queue: string[] = [];
   private listeners = new Map<string, Set<(payload: unknown) => void>>();
   private hostHandlers = new Map<string, Set<HostHandler>>();
+  /**
+   * Events that arrived before anyone listened (the catch-up the app sends on
+   * connect lands before the island has finished booting). Handed over on listen.
+   */
+  private early = new Map<string, unknown[]>();
 
   constructor() {
     if (!IS_PLASMA) return;
@@ -91,7 +96,14 @@ class PlasmaConnection {
       return;
     }
     if (typeof msg.event === "string") {
-      for (const fn of this.listeners.get(msg.event) ?? []) fn(msg.payload);
+      const fns = this.listeners.get(msg.event);
+      if (!fns || fns.size === 0) {
+        const queue = this.early.get(msg.event) ?? [];
+        if (queue.length < 50) queue.push(msg.payload);
+        this.early.set(msg.event, queue);
+        return;
+      }
+      for (const fn of fns) fn(msg.payload);
       return;
     }
     if (typeof msg.id !== "number") return;
@@ -117,6 +129,11 @@ class PlasmaConnection {
     const fn = handler as (payload: unknown) => void;
     set.add(fn);
     this.listeners.set(event, set);
+    const queued = this.early.get(event);
+    if (queued) {
+      this.early.delete(event);
+      for (const payload of queued) fn(payload);
+    }
     return () => set.delete(fn);
   }
 
