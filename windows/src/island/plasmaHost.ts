@@ -74,6 +74,10 @@ export function installPlasmaHost(island: Island) {
       if (island.fsm.state !== "home") island.alert(State.defaultView());
       State.notify();
     });
+    // A click on one of the panel Mochis opens the popup on that pill.
+    Plasma.onHost("focus", (id) => {
+      if (typeof id === "string" && State.tasks.some((t) => t.id === id)) State.setFocus(id);
+    });
     Plasma.onHost("close", () => {
       popupOpen = false;
       // A card nobody can see any more must not keep Claude Code waiting.
@@ -114,16 +118,21 @@ export function installPlasmaHost(island: Island) {
       .filter((a) => State.tasks.some((t) => t.id === a.id))
       .sort((a, b) => (URGENCY[b.state] ?? 0) - (URGENCY[a.state] ?? 0));
 
-    // The panel Mochi wears the most urgent mood, whoever it belongs to.
+    // The panel draws one Mochi per pill, each in its own mood — a mood raised
+    // while nobody was looking included.
+    const tasks = State.tasks.map((t) => ({
+      id: t.id, name: t.name, color: t.color, state: wanting.get(t.id) ?? t.state,
+    }));
     const state = attention[0]?.state ?? State.effectiveState;
     const size = islandSize(State.mode, State.view, State.chatHistory.length);
-    const key = `${state}|${State.mode}|${size.w}x${size.h}|${State.paused}|${JSON.stringify(attention)}`;
+    const key = `${state}|${State.mode}|${size.w}x${size.h}|${State.paused}|${JSON.stringify(attention)}|${JSON.stringify(tasks)}`;
     if (key === last) return;
     last = key;
     Plasma.post({
       type: "state",
       payload: {
         bot: state, color: botGlowColor(state), mode: State.mode, paused: State.paused, size, attention,
+        tasks: tasks.map((t) => ({ ...t, glow: botGlowColor(t.state) })),
       },
     });
   });

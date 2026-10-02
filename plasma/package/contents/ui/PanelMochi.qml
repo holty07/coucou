@@ -13,6 +13,9 @@ Item {
     /** False when the app is not running or paused: eyes shut, no motion. */
     property bool awake: true
     property bool hovered: false
+    /** The pill's colour, as on the island's mini Mochis. Unset: the grey Mochi. */
+    property color body: "transparent"
+    readonly property bool coloured: body.a > 0
 
     readonly property bool alerting: mood === "approval" || mood === "question" || mood === "error"
     readonly property bool busy: mood === "working" || mood === "thinking" || mood === "searching"
@@ -22,7 +25,7 @@ Item {
     // Same palette as src/mochi/engine.ts.
     readonly property color baseTop: "#EDEDEF"
     readonly property color baseBottom: "#C4C5CA"
-    readonly property color ink: "#1A1412"
+    readonly property color ink: coloured ? "#10131A" : "#1A1412"
 
     function tinted(c, amount) {
         return Qt.rgba(baseTop.r + (c.r - baseTop.r) * amount,
@@ -32,8 +35,9 @@ Item {
 
     // Soft halo in the state's colour.
     Rectangle {
-        anchors.centerIn: body
-        width: body.width * 1.35
+        anchors.centerIn: bodyRect
+        // Tight enough that Mochis sitting side by side don't run into each other.
+        width: bodyRect.width * 1.12
         height: width
         radius: width / 2
         color: mochi.glow
@@ -50,7 +54,7 @@ Item {
     }
 
     Rectangle {
-        id: body
+        id: bodyRect
         width: mochi.s * 0.86
         height: width
         x: (mochi.width - width) / 2
@@ -60,13 +64,14 @@ Item {
         gradient: Gradient {
             GradientStop {
                 position: 0
-                color: mochi.mood === "idle" || mochi.asleep ? mochi.baseTop : mochi.tinted(mochi.glow, 0.55)
+                color: mochi.coloured ? Qt.lighter(mochi.body, 1.25)
+                    : mochi.mood === "idle" || mochi.asleep ? mochi.baseTop : mochi.tinted(mochi.glow, 0.55)
             }
-            GradientStop { position: 1; color: mochi.baseBottom }
+            GradientStop { position: 1; color: mochi.coloured ? Qt.darker(mochi.body, 1.12) : mochi.baseBottom }
         }
         transform: Scale {
-            origin.x: body.width / 2
-            origin.y: body.height
+            origin.x: bodyRect.width / 2
+            origin.y: bodyRect.height
             xScale: 1 + breath.value * 0.03
             yScale: 1 - breath.value * 0.03 + (mochi.hovered ? 0.04 : 0)
         }
@@ -85,11 +90,11 @@ Item {
             id: eyes
             anchors.horizontalCenter: parent.horizontalCenter
             y: parent.height * (0.5 - 0.12) - height / 2 + mochi.lookY
-            spacing: body.width * 0.37 - eyeL.width
+            spacing: bodyRect.width * 0.37 - eyeL.width
             Rectangle {
                 id: eyeL
-                width: body.width * (mochi.hovered ? 0.27 : 0.23)
-                height: mochi.asleep ? Math.max(1.5, body.width * 0.05) : body.width * 0.27 * blink.open
+                width: bodyRect.width * (mochi.hovered ? 0.27 : 0.23)
+                height: mochi.asleep ? Math.max(1.5, bodyRect.width * 0.05) : bodyRect.width * 0.27 * blink.open
                 anchors.verticalCenter: parent.verticalCenter
                 radius: Math.min(width, height) / 2
                 color: mochi.ink
@@ -112,8 +117,8 @@ Item {
         width: mochi.s * 0.36
         height: width
         radius: width / 2
-        x: body.x + body.width - width * 0.7
-        y: body.y - height * 0.25
+        x: bodyRect.x + bodyRect.width - width * 0.7
+        y: bodyRect.y - height * 0.25
         color: mochi.glow
         border.color: "#000000"
         border.width: Math.max(1, mochi.s * 0.03)
@@ -127,8 +132,8 @@ Item {
     }
 
     // Eyes drift while Claude searches, look down while it works.
-    readonly property real lookY: mood === "working" ? body.height * 0.04
-        : mood === "thinking" ? -body.height * 0.04 : 0
+    readonly property real lookY: mood === "working" ? bodyRect.height * 0.04
+        : mood === "thinking" ? -bodyRect.height * 0.04 : 0
 
     QtObject {
         id: blink

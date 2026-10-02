@@ -178,70 +178,77 @@ PlasmoidItem {
             islandMode = msg.payload.mode;
             paused = msg.payload.paused;
             attention = msg.payload.attention || [];
+            tasks = msg.payload.tasks || [];
             if (msg.payload.size && msg.payload.size.h > 0) islandHeight = msg.payload.size.h;
             break;
         }
     }
 
-    onExpandedChanged: {
-        if (inPanel) toPage({ type: expanded ? "open" : "close" });
+    onExpandedChanged: function () {
+        if (inPanel) toPage({ type: root.expanded ? "open" : "close" });
     }
 
     // ── Panel: the small Mochi ──────────────────────────────────────────────
 
-    compactRepresentation: MouseArea {
+    /** Every pill, in the island's order: {id, name, color, state, glow}. */
+    property var tasks: []
+
+    compactRepresentation: Item {
         id: compact
-        Layout.minimumWidth: root.inPanel ? Kirigami.Units.iconSizes.medium : -1
-        Layout.preferredWidth: Plasmoid.formFactor === PlasmaCore.Types.Vertical ? -1 : height
-        hoverEnabled: true
-        acceptedButtons: Qt.LeftButton
-        onClicked: {
-            if (!root.connected) root.startApp();
-            else root.expanded = !root.expanded;
-        }
+        readonly property bool vertical: Plasmoid.formFactor === PlasmaCore.Types.Vertical
+        // One square per Mochi, side by side with no gap — the island's compact
+        // bar without the notch.
+        readonly property real cell: vertical ? width : height
+        readonly property int count: root.connected ? Math.max(1, root.tasks.length) : 1
+        Layout.minimumWidth: vertical ? -1 : cell * count
+        Layout.preferredWidth: vertical ? -1 : cell * count
+        Layout.minimumHeight: vertical ? cell * count : -1
+        Layout.preferredHeight: vertical ? cell * count : -1
 
-        PanelMochi {
+        Grid {
             anchors.centerIn: parent
-            // Makes room for the attention dots underneath.
-            anchors.verticalCenterOffset: root.attention.length > 0 ? -parent.height * 0.07 : 0
-            width: Math.min(parent.width, parent.height) * (root.attention.length > 0 ? 0.72 : 0.8)
-            height: width
-            mood: root.botState
-            glow: root.botColor
-            awake: root.connected && !root.paused
-            hovered: compact.containsMouse
-        }
+            columns: compact.vertical ? 1 : compact.count
+            spacing: 0
 
-        // One dot per Mochi that wants you, in its pill colour, so you can tell
-        // at a glance whether it's Claude Code, Slack, GitHub…
-        Row {
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 1
-            spacing: Math.max(1, compact.height * 0.04)
-            visible: root.connected
             Repeater {
-                model: root.attention.slice(0, 4)
-                delegate: Rectangle {
+                // Not running: one sleeping Mochi that starts the app on a click.
+                model: root.connected && root.tasks.length > 0
+                    ? root.tasks
+                    : [{ id: "", name: "Coucou", color: "", state: "sleeping", glow: "#FFFFFF" }]
+
+                delegate: MouseArea {
+                    id: slot
                     required property var modelData
-                    width: Math.max(4, compact.height * 0.14)
-                    height: width
-                    radius: width / 2
-                    color: modelData.color
-                    border.color: modelData.state === "approval" ? "#F5A524"
-                        : modelData.state === "error" ? "#F4505E" : "transparent"
-                    border.width: border.color === "transparent" ? 0 : 1
-                    SequentialAnimation on opacity {
-                        running: modelData.state === "approval" || modelData.state === "question"
-                        loops: Animation.Infinite
-                        NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
-                        NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                    width: compact.cell
+                    height: compact.cell
+                    hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton
+                    onClicked: {
+                        if (!root.connected) return root.startApp();
+                        if (root.expanded) return root.expanded = false;
+                        if (modelData.id) root.toPage({ type: "focus", payload: modelData.id });
+                        root.expanded = true;
                     }
+
+                    PanelMochi {
+                        anchors.centerIn: parent
+                        width: parent.width * 0.96
+                        height: width
+                        mood: slot.modelData.state
+                        glow: slot.modelData.glow
+                        // Claude Code is the grey Mochi, as on the island; the
+                        // integrations wear their pill colour.
+                        body: slot.modelData.id && slot.modelData.id !== "integration_claude"
+                            ? slot.modelData.color : "transparent"
+                        awake: root.connected && !root.paused
+                        hovered: slot.containsMouse
+                    }
+
                 }
             }
         }
 
-        // Dragging a file onto the panel Mochi opens the island to drop it into.
+        // Dragging a file onto the panel opens the island to drop it into.
         DropArea {
             anchors.fill: parent
             keys: ["text/uri-list"]
