@@ -15,6 +15,8 @@ mod herdr;
 #[cfg(target_os = "linux")]
 mod plasma;
 mod secrets;
+#[cfg(target_os = "linux")]
+mod sessions;
 mod settings;
 mod tray;
 #[cfg(windows)]

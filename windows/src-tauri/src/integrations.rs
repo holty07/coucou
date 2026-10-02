@@ -66,7 +66,8 @@ pub fn start(app: AppHandle) {
     spawn(app.clone(), "integration_vercel", 5, 30, poll_vercel);
     spawn(app.clone(), "integration_stripe", 6, 30, poll_stripe);
     spawn(app.clone(), "integration_resend", 6, 60, poll_resend);
-    spawn(app.clone(), "integration_github", 7, 300, poll_github);
+    // Reviews and CI are worth knowing about within a minute.
+    spawn(app.clone(), "integration_github", 7, 60, poll_github);
     spawn(app.clone(), "integration_calcom", 8, 300, poll_calcom);
     spawn(app.clone(), "integration_notion", 9, 300, poll_notion);
     spawn(app, "integration_slack", 4, 60, poll_slack);
@@ -266,63 +267,200 @@ async fn poll_stripe(app: AppHandle) {
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
 
+// Pull requests that want you: reviews requested from you, and your own open
+// PRs whose CI or reviews changed. One GraphQL query per poll — it works with a
+// fine-grained token (Pull requests + Commit statuses, read), which can't read
+// the notifications inbox. Only repositories the token was granted are seen.
+
+#[derive(Default)]
+struct GithubState {
+    token_tag: String,
+    login: String,
+    /// False until the first full poll: that one only fills the card.
+    primed: bool,
+    reviews: std::collections::HashSet<String>,
+    /// PR key → "passing" | "failing" | "pending" | "".
+    checks: std::collections::HashMap<String, String>,
+    /// PR key → GitHub's reviewDecision.
+    decisions: std::collections::HashMap<String, String>,
+}
+
+static GITHUB: std::sync::LazyLock<tokio::sync::Mutex<GithubState>> =
+    std::sync::LazyLock::new(Default::default);
+
+const GITHUB_PR_FIELDS: &str = "number title url updatedAt isDraft repository { nameWithOwner } author { login }";
+
+async fn github_graphql(token: &str, query: String) -> Result<Value, String> {
+    let response = client()
+        .post("https://api.github.com/graphql")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "Coucou")
+        .json(&json!({ "query": query }))
+        .send()
+        .await
+        .map_err(|_| String::new())?;
+    if !response.status().is_success() {
+        return Err(status_error(response.status().as_u16(), "Token lacks the needed access"));
+    }
+    let v: Value = response.json().await.map_err(|_| String::new())?;
+    match v.get("data") {
+        Some(data) if !data.is_null() => Ok(data.clone()),
+        _ => Err(v
+            .pointer("/errors/0/message")
+            .and_then(Value::as_str)
+            .unwrap_or("GitHub said no")
+            .to_string()),
+    }
+}
+
 async fn poll_github(app: AppHandle) {
     let Some(token) = secrets::get("github-token") else { return };
-    let http = client();
-
-    let user = http
-        .get("https://api.github.com/user")
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "Coucou")
-        .send()
-        .await;
-    let Ok(response) = user else { return };
-    if !response.status().is_success() {
-        emit(&app, IntegrationUpdate {
-            id: "integration_github",
-            data: json!({}),
-            error: Some(status_error(response.status().as_u16(), "Token lacks the needed scope")),
-            event: None,
-        });
-        return;
-    }
-    let json: Value = response.json().await.unwrap_or(json!({}));
-    let public = json.get("public_repos").and_then(Value::as_i64).unwrap_or(0);
-    let private = json
-        .get("owned_private_repos")
-        .or_else(|| json.get("total_private_repos"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-
-    let repos = http
-        .get("https://api.github.com/user/repos?per_page=100&affiliation=owner&sort=pushed")
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "Coucou")
-        .send()
-        .await;
-    let stars: i64 = match repos {
-        Ok(r) if r.status().is_success() => r
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .map(|list| {
-                list.iter()
-                    .filter_map(|r| r.get("stargazers_count").and_then(Value::as_i64))
-                    .sum()
-            })
-            .unwrap_or(0),
-        _ => 0,
+    let report = |app: &AppHandle, message: String| {
+        log::line(format!("github: {message}"));
+        emit(app, IntegrationUpdate { id: "integration_github", data: json!({}), error: Some(message), event: None });
     };
+
+    let mut state = GITHUB.lock().await;
+    let tag: String = token.chars().rev().take(8).collect();
+    if state.token_tag != tag {
+        *state = GithubState { token_tag: tag, ..GithubState::default() };
+    }
+    if state.login.is_empty() {
+        match github_graphql(&token, "{ viewer { login } }".into()).await {
+            Ok(v) => state.login = v.pointer("/viewer/login").and_then(Value::as_str).unwrap_or_default().into(),
+            Err(m) if m.is_empty() => return, // network blip: next time
+            Err(m) => return report(&app, m),
+        }
+        if state.login.is_empty() {
+            return;
+        }
+    }
+
+    let who = &state.login;
+    let query = format!(
+        r#"{{
+  reviews: search(query: "is:open is:pr archived:false review-requested:{who}", type: ISSUE, first: 20) {{
+    nodes {{ ... on PullRequest {{ {GITHUB_PR_FIELDS} }} }}
+  }}
+  mine: search(query: "is:open is:pr archived:false author:{who}", type: ISSUE, first: 20) {{
+    nodes {{ ... on PullRequest {{ {GITHUB_PR_FIELDS} reviewDecision
+      commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }}
+  }}
+}}"#
+    );
+    let data = match github_graphql(&token, query).await {
+        Ok(v) => v,
+        Err(m) if m.is_empty() => return,
+        Err(m) => return report(&app, m),
+    };
+
+    let key = |pr: &Value| {
+        format!(
+            "{}#{}",
+            pr.pointer("/repository/nameWithOwner").and_then(Value::as_str).unwrap_or("?"),
+            pr.get("number").and_then(Value::as_i64).unwrap_or(0)
+        )
+    };
+    let summary = |pr: &Value, extra: Value| {
+        let mut o = json!({
+            "key": key(pr),
+            "repo": pr.pointer("/repository/nameWithOwner").and_then(Value::as_str).unwrap_or(""),
+            "number": pr.get("number").cloned().unwrap_or(Value::Null),
+            "title": pr.get("title").and_then(Value::as_str).unwrap_or(""),
+            "url": pr.get("url").and_then(Value::as_str).unwrap_or(""),
+            "author": pr.pointer("/author/login").and_then(Value::as_str).unwrap_or(""),
+            "updatedAt": pr.get("updatedAt").cloned().unwrap_or(Value::Null),
+            "draft": pr.get("isDraft").and_then(Value::as_bool).unwrap_or(false),
+        });
+        if let (Some(o), Some(extra)) = (o.as_object_mut(), extra.as_object()) {
+            o.extend(extra.clone());
+        }
+        o
+    };
+    let nodes = |name: &str| -> Vec<Value> {
+        data.pointer(&format!("/{name}/nodes"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter(|n| n.get("number").is_some()).cloned().collect())
+            .unwrap_or_default()
+    };
+
+    let reviews: Vec<Value> = nodes("reviews").iter().map(|pr| summary(pr, json!({}))).collect();
+    let mine: Vec<Value> = nodes("mine")
+        .iter()
+        .map(|pr| {
+            let checks = match pr
+                .pointer("/commits/nodes/0/commit/statusCheckRollup/state")
+                .and_then(Value::as_str)
+            {
+                Some("SUCCESS") => "passing",
+                Some("FAILURE" | "ERROR") => "failing",
+                Some(_) => "pending",
+                None => "",
+            };
+            let decision = pr.get("reviewDecision").and_then(Value::as_str).unwrap_or("");
+            summary(pr, json!({ "checks": checks, "review": decision }))
+        })
+        .collect();
+
+    // What changed since last time, most pressing first. One event per poll.
+    let mut events: Vec<(u8, IntegrationEvent)> = Vec::new();
+    let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let detail = |pr: &Value| Some(format!("{} · {}", short_key(&str_of(pr, "key")), str_of(pr, "title")));
+    for pr in &reviews {
+        if state.primed && !state.reviews.contains(&str_of(pr, "key")) {
+            let who = str_of(pr, "author");
+            let label = if who.is_empty() { "Review requested".into() } else { format!("{who} wants your review") };
+            events.push((2, IntegrationEvent { success: true, label, detail: detail(pr) }));
+        }
+    }
+    for pr in &mine {
+        let k = str_of(pr, "key");
+        let checks = str_of(pr, "checks");
+        let review = str_of(pr, "review");
+        if state.primed {
+            let before_checks = state.checks.get(&k).cloned().unwrap_or_default();
+            let before_review = state.decisions.get(&k).cloned().unwrap_or_default();
+            if checks == "failing" && before_checks != "failing" {
+                events.push((0, IntegrationEvent { success: false, label: "CI failed".into(), detail: detail(pr) }));
+            } else if checks == "passing" && before_checks == "pending" {
+                events.push((4, IntegrationEvent { success: true, label: "CI passed".into(), detail: detail(pr) }));
+            }
+            if review != before_review {
+                match review.as_str() {
+                    "CHANGES_REQUESTED" => events.push((1, IntegrationEvent {
+                        success: false, label: "Changes requested".into(), detail: detail(pr),
+                    })),
+                    "APPROVED" => events.push((3, IntegrationEvent {
+                        success: true, label: "PR approved".into(), detail: detail(pr),
+                    })),
+                    _ => {}
+                }
+            }
+        }
+    }
+    state.reviews = reviews.iter().map(|pr| str_of(pr, "key")).collect();
+    state.checks = mine.iter().map(|pr| (str_of(pr, "key"), str_of(pr, "checks"))).collect();
+    state.decisions = mine.iter().map(|pr| (str_of(pr, "key"), str_of(pr, "review"))).collect();
+    if !state.primed {
+        log::line(format!(
+            "github: watching as {} — {} review request(s), {} open PR(s) of yours",
+            state.login, reviews.len(), mine.len()
+        ));
+    }
+    state.primed = true;
+    events.sort_by_key(|(rank, _)| *rank);
 
     emit(&app, IntegrationUpdate {
         id: "integration_github",
-        data: json!({ "totalRepos": public + private, "totalStars": stars }),
+        data: json!({ "login": state.login, "reviews": reviews, "mine": mine }),
         error: None,
-        event: None,
+        event: events.into_iter().next().map(|(_, e)| e),
     });
+}
+
+/// `owner/repo#12` → `repo#12`: the owner is nearly always you or your org.
+fn short_key(key: &str) -> &str {
+    key.rsplit_once('/').map(|(_, k)| k).unwrap_or(key)
 }
 
 // ── Vercel ────────────────────────────────────────────────────────────────────

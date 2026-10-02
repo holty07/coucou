@@ -6,8 +6,9 @@
 // in a QtWebEngine view, served by the app on 127.0.0.1 and driven over a
 // token-protected WebSocket (see windows/src-tauri/src/plasma.rs).
 //
-// On the desktop the widget is the island itself. In a panel it shows a small
-// Mochi, and the island opens in its popup.
+// In a panel it shows a small Mochi, and the island opens in its popup. On the
+// desktop it is a board instead: every Claude Code session, the plan's usage and
+// the integrations, without ever acting or opening anything on its own.
 
 import QtQuick
 import QtQuick.Layouts
@@ -36,12 +37,15 @@ PlasmoidItem {
     property bool paused: false
     /** Every Mochi that wants you, most urgent first: {id, name, color, state}. */
     property var attention: []
+    /** Desktop: what the board shows, worked out by board.html. */
+    property var board: null
 
     function wantsText(a) {
         switch (a.state) {
         case "approval": return i18n("%1 needs your approval", a.name);
-        case "question": return a.id === "integration_slack"
-            ? i18n("%1: unread DMs", a.name) : i18n("%1 has a question", a.name);
+        case "question": return a.id === "integration_slack" ? i18n("%1: unread DMs", a.name)
+            : a.id === "integration_github" ? i18n("%1: pull requests waiting on you", a.name)
+            : i18n("%1 has a question", a.name);
         case "error": return i18n("%1 hit an error", a.name);
         case "finished": return i18n("%1 is ready", a.name);
         }
@@ -49,7 +53,7 @@ PlasmoidItem {
     }
 
     readonly property string pageUrl: conn
-        ? conn.page + "/index.html?host=" + (inPanel ? "panel" : "desktop")
+        ? conn.page + (inPanel ? "/index.html?host=panel" : "/board.html?host=desktop")
             + "#ws=" + encodeURIComponent(conn.ws) + "&token=" + conn.token
         : ""
 
@@ -172,6 +176,9 @@ PlasmoidItem {
         case "collapse":
             if (inPanel) root.expanded = false;
             break;
+        case "board":
+            board = msg.payload;
+            break;
         case "state":
             botState = msg.payload.bot;
             botColor = msg.payload.color;
@@ -263,16 +270,33 @@ PlasmoidItem {
     fullRepresentation: Item {
         // The page lays the island out in a fixed 720×320 window, glued to the
         // top edge and centred, exactly like the Windows and macOS panels.
-        Layout.preferredWidth: 720
         // In the popup: exactly the expanded island plus a margin, never less.
+        // The desktop board fills whatever size the widget is given.
         readonly property real popupHeight: Math.min(320, root.islandHeight + 24)
-        Layout.preferredHeight: root.inPanel ? popupHeight : 320
-        Layout.minimumWidth: root.inPanel ? 720 : 300
-        Layout.minimumHeight: root.inPanel ? popupHeight : 60
+        Layout.preferredWidth: root.inPanel ? 720 : Kirigami.Units.gridUnit * 22
+        Layout.preferredHeight: root.inPanel ? popupHeight : Kirigami.Units.gridUnit * 30
+        Layout.minimumWidth: root.inPanel ? 720 : Kirigami.Units.gridUnit * 14
+        Layout.minimumHeight: root.inPanel ? popupHeight : Kirigami.Units.gridUnit * 12
+
+        // On the desktop the page only does the thinking and the board below
+        // draws (a Chromium canvas animating all day inside plasmashell grew
+        // until the kernel OOM-killed it). It still has to be visible to run at
+        // full speed, so it sits underneath at 1×1 and fully transparent.
+        BoardView {
+            anchors.fill: parent
+            visible: !root.inPanel && root.connected
+            board: root.board
+            onOpenSession: (id) => root.toPage({ type: "board-open", payload: id })
+            onOpenUrl: (url) => root.toPage({ type: "board-url", payload: url })
+        }
 
         WebEngineView {
             id: view
-            anchors.fill: parent
+            anchors.fill: root.inPanel ? parent : undefined
+            width: root.inPanel ? parent.width : 1
+            height: root.inPanel ? parent.height : 1
+            opacity: root.inPanel ? 1 : 0
+            z: -1
             visible: root.connected
             backgroundColor: "transparent"
             url: root.pageUrl
@@ -319,7 +343,8 @@ PlasmoidItem {
         DropArea {
             anchors.fill: parent
             keys: ["text/uri-list"]
-            enabled: root.connected
+            // The board takes no files.
+            enabled: root.connected && root.inPanel
             onEntered: (drag) => {
                 drag.accept(Qt.CopyAction);
                 root.toPage({ type: "cursor", payload: { x: drag.x, y: drag.y } });

@@ -364,6 +364,9 @@ async fn dispatch(app: &AppHandle, client: u64, cmd: &str, args: Value) -> Resul
         }
         "open_n8n" => ok(crate::open_n8n()),
         "set_paused" => ok(crate::set_paused(arg(&args, "paused")?)),
+        // The desktop board: every running session, and the plan's usage.
+        "claude_sessions" => ok(crate::sessions::list()),
+        "claude_usage" => ok(crate::sessions::usage()),
         // One widget's popup was opened: everything that wanted attention has
         // been seen, on every panel (one widget per monitor, say).
         "attention_seen" => {

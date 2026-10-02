@@ -124,8 +124,15 @@ export function hexToRGB(hex: string): RGB {
   return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
 }
 
-const rgba = (c: RGB, a = 1) =>
-  `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`;
+/**
+ * Colours come out in steps, never as a fresh string every frame: Chromium
+ * keeps every colour string it parses, so an animated `rgba(…, 0.4371)` grows
+ * the renderer for as long as Mochi moves (see fixedSizeText). Steps of 1/50 in
+ * alpha and 3 in each channel are invisible and keep the set small.
+ */
+const qa = (a: number) => Math.round(Math.min(1, Math.max(0, a)) * 50) / 50;
+const qc = (v: number) => Math.min(255, Math.round((v * 255) / 3) * 3);
+const rgba = (c: RGB, a = 1) => `rgba(${qc(c[0])},${qc(c[1])},${qc(c[2])},${qa(a)})`;
 
 const mix3 = (a: RGB, b: RGB, t: number): RGB => [
   lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t),
@@ -662,7 +669,7 @@ export class BotEngine {
       x.save();
       x.clip(body);
       const yOffset = Math.sin(this.yaw) * rx * 0.8;
-      x.fillStyle = `rgba(255,120,150,${0.5 * blushVal})`;
+      x.fillStyle = `rgba(255,120,150,${qa(0.5 * blushVal)})`;
       for (const sd of [-1, 1]) {
         x.beginPath();
         x.ellipse(sd * rx * 0.55 + yOffset, ry * 0.2, R * 0.17, R * 0.1, 0, 0, Math.PI * 2);
@@ -903,7 +910,7 @@ export class BotEngine {
     x.save();
     x.clip(body);
 
-    x.strokeStyle = `rgba(255,255,255,${0.55 * m})`;
+    x.strokeStyle = `rgba(255,255,255,${qa(0.55 * m)})`;
     x.lineWidth = 1;
     x.lineCap = "round";
     x.beginPath();
@@ -921,7 +928,7 @@ export class BotEngine {
       x.fill();
       if (hH > 4) {
         const lipR = Math.min(hR, (hW - 2) / 2);
-        x.strokeStyle = `rgba(255,255,255,${0.28 * m})`;
+        x.strokeStyle = `rgba(255,255,255,${qa(0.28 * m)})`;
         x.beginPath();
         x.moveTo(hX + lipR, hY + hH - 0.5);
         x.lineTo(hX + hW - lipR, hY + hH - 0.5);
@@ -1050,10 +1057,7 @@ export class BotEngine {
       x.fill();
       if (!this.isMini) {
         x.fillStyle = "#fff";
-        x.font = `900 ${R * 0.32}px ${FONT}`;
-        x.textAlign = "center";
-        x.textBaseline = "middle";
-        x.fillText(badge.kind === "bang" ? "!" : "?", 0, R * 0.02);
+        fixedSizeText(x, badge.kind === "bang" ? "!" : "?", 900, R * 0.32, 0, R * 0.02);
       }
     } else {
       x.fillStyle = "#000";
@@ -1109,15 +1113,32 @@ export class BotEngine {
           break;
         case "z":
           x.fillStyle = "rgb(209,219,235)";
-          x.font = `700 ${sz * 1.9}px ${FONT}`;
-          x.textAlign = "center";
-          x.textBaseline = "middle";
-          x.fillText("z", 0, 0);
+          fixedSizeText(x, "z", 700, sz * 1.9, 0, 0);
           break;
       }
       x.restore();
     }
   }
+}
+
+/**
+ * Text at any size without a new font per frame. Chromium caches every font
+ * string it sees and never lets go, so an animated `${size}px` grows the
+ * renderer without bound (17 MB/s for a board of sleeping Mochis, until the
+ * kernel killed plasmashell). One size, scaled instead.
+ */
+const TEXT_PX = 32;
+function fixedSizeText(
+  x: CanvasRenderingContext2D, text: string, weight: number, px: number, tx: number, ty: number,
+) {
+  x.save();
+  x.translate(tx, ty);
+  x.scale(px / TEXT_PX, px / TEXT_PX);
+  x.font = `${weight} ${TEXT_PX}px ${FONT}`;
+  x.textAlign = "center";
+  x.textBaseline = "middle";
+  x.fillText(text, 0, 0);
+  x.restore();
 }
 
 /** Ray → rounded-rect boundary intersection, for the mailbox morph. */

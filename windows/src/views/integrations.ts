@@ -8,6 +8,7 @@ import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { State, type AgentTask } from "../core/state";
 import { Bridge } from "../core/bridge";
+import { githubSummary, githubView, githubWaiting, prStatus, shortRef, type GithubPr } from "../core/github";
 
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
@@ -204,32 +205,39 @@ function resendCard(): HTMLElement {
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
 
-function statRow(icon: string, color: string, label: string, value: string): HTMLElement {
-  return h(
-    "div",
-    { class: "int-stat" },
-    h("i", { class: "int-stat-icon", style: `color:${color}` }, svg(icon, 10)),
-    h("span", { class: "int-stat-label", text: label }),
-    h("span", { class: "int-stat-value", text: value }),
-  );
-}
-
 function githubCard(): HTMLElement {
-  const d = get("integration_github");
-  const stars = Number(d.totalStars ?? 0);
-  const repos = Number(d.totalRepos ?? 0);
-  const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-  return h(
-    "div",
-    { class: "int-card" },
-    header("#F4505E", "GitHub", "Overview"),
-    h(
-      "div",
-      { class: "int-stats" },
-      statRow(ICONS.star, "#F5A524", "Total stars", fmt(stars)),
-      statRow(ICONS.stack, "#6B7079", "Repositories", String(repos)),
-    ),
-  );
+  const v = githubView(get("integration_github"));
+  const waiting = githubWaiting(v);
+  const extra = waiting > 0
+    ? h("span", { class: "int-total" }, h("i", { class: "pulse" }), h("span", { text: String(waiting) }))
+    : undefined;
+  const rows = h("div", { class: "int-rows tight" });
+  // What waits on you first, then the rest of yours.
+  const list: [GithubPr, boolean][] = [
+    ...v.reviews.map((pr): [GithubPr, boolean] => [pr, true]),
+    ...v.blocked.map((pr): [GithubPr, boolean] => [pr, false]),
+    ...v.open.map((pr): [GithubPr, boolean] => [pr, false]),
+  ];
+  if (list.length === 0) rows.append(h("div", { class: "int-row", text: "No open pull requests" }));
+  for (const [pr, isReview] of list.slice(0, 3)) {
+    const st = prStatus(pr, isReview);
+    rows.append(
+      h(
+        "button",
+        {
+          class: "int-page",
+          title: `${shortRef(pr)} ${pr.title}`,
+          onclick: () => {
+            if (pr.url) void Bridge.openUrl(pr.url);
+          },
+        },
+        dot(st.color, 5),
+        h("span", { class: "int-name", text: `${shortRef(pr)} ${pr.title}` }),
+        h("span", { class: "int-ago", text: st.text }),
+      ),
+    );
+  }
+  return h("div", { class: "int-card" }, header("#F4505E", "GitHub", githubSummary(v), extra), rows);
 }
 
 // ── Stripe ────────────────────────────────────────────────────────────────────
@@ -433,7 +441,7 @@ export function hasIntegrationData(id: string): boolean {
     case "integration_resend":
       return arr(id, "emails").length > 0;
     case "integration_github":
-      return get(id).totalRepos != null;
+      return Array.isArray(get(id).mine);
     case "integration_stripe":
       return info.loaded;
     case "integration_notion":

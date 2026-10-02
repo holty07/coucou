@@ -2,7 +2,8 @@
 
 A personal fork of [louis-cfm/coucou](https://github.com/louis-cfm/coucou) that runs
 on Linux, with Mochi living in a **KDE Plasma 6 widget** — in a panel (a small Mochi
-that opens the island in a popup) or on the desktop (the island itself).
+that opens the island in a popup) or on the desktop (a board of every Claude Code
+session, the plan's usage, Slack and GitHub).
 
 Tested on CachyOS, Plasma 6.7, Wayland.
 
@@ -24,6 +25,11 @@ Tested on CachyOS, Plasma 6.7, Wayland.
   `claude -p` (lean: no MCP, skills, plugins or hooks; web search, fetch and Read
   only), so it uses your plan instead of a billed API key. Switch in
   Settings → Claude → "Chat runs on".
+- **GitHub pull requests.** The GitHub Mochi watches review requests for you and
+  your own open PRs (CI failing or passing, approved, changes requested), every
+  minute, and stays curious while anything waits on you. One GraphQL query; a
+  fine-grained token needs *Pull requests* and *Commit statuses* (read), and only
+  sees the repositories it was granted.
 - **herdr.** Sessions running in [herdr](https://herdr.dev) are tracked by pane;
   "Open in herdr" focuses the session's pane and raises its terminal (via KWin).
 - The Claude Code card is called Claude Code (not VS Code); step labels are English.
@@ -62,12 +68,21 @@ Where things are:
 | herdr focus + KWin raise | `windows/src-tauri/src/herdr.rs` |
 | Slack poller | `windows/src-tauri/src/integrations.rs` (`poll_slack`) |
 | Page side of the widget (WebSocket transport, host messages) | `windows/src/core/plasma.ts`, `windows/src/island/plasmaHost.ts` |
+| Desktop board (every session, usage, Slack/GitHub) | `windows/src/board/`, `windows/src-tauri/src/sessions.rs` |
 | The widget itself (QML) | `plasma/package/contents/ui/main.qml`, `PanelMochi.qml` |
 
 The page talks to the widget through `console.log("coucou-host:" + JSON)` (read in
 `onJavaScriptConsoleMessage`), and the widget talks to the page with
 `runJavaScript("window.coucouHost.receive(…)")`. The page is told whether it is in a
 panel or on the desktop by `?host=panel|desktop`.
+
+The desktop board (`board.html`) is a separate page that draws nothing: it works
+out the board and posts it to the widget, which draws it in QML (`BoardView.qml`,
+with `PanelMochi.qml` for every face). It lists sessions from Claude
+Code's own registry (`~/.claude/sessions/*.json`) plus the hook events, and never
+acts — permission requests are handed back to the terminal (or to an open panel
+popup). The usage meters read `rate_limits` from `~/.claude/plasma-usage-status.json`,
+which a `statusLine` command has to write; without it they are simply not shown.
 
 Dev loop:
 
@@ -94,6 +109,15 @@ systemctl --user restart plasma-plasmashell.service
 ```
 
 Gotchas learned the hard way:
+
+- Never animate a canvas all day in a widget page. Inside plasmashell Chromium
+  leaves native memory behind on every `save()`, `clip()` and gradient that only a
+  forced collection frees, so a board of canvas Mochis grew ~10 MB/s until the
+  kernel OOM-killed plasmashell. Draw in QML instead. In the engine, never build a
+  new font or colour string per frame either (`fixedSizeText`, `qa`/`qc` in
+  `mochi/engine.ts`) — Chromium caches each one forever.
+- `font.pixelSize` in QML must be a whole number; a fractional one stops the widget
+  loading at all ("Invalid property assignment: int expected").
 
 - `plasmawindowed io.github.holty07.coucou` runs the widget in a window (desktop form
   factor only), but KWin keeps it behind other windows and Chromium then stops

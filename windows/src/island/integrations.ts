@@ -6,6 +6,7 @@ import { onEvent, Bridge, type IntegrationUpdate } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import type { Island } from "./island";
+import { githubView, githubWaiting } from "../core/github";
 
 /** Which Credential Manager key backs each pill. */
 const KEY_FOR: Record<string, string> = {
@@ -92,6 +93,15 @@ function handle(island: Island, update: IntegrationUpdate) {
     const unread = Number((update.data as { unread?: number }).unread ?? 0);
     if (task && task.state !== "finished" && task.state !== "error") {
       task.state = unread > 0 ? "question" : "idle";
+    }
+  }
+
+  // Same for GitHub, for as long as a review or one of your PRs is waiting.
+  if (update.id === "integration_github" && !update.error) {
+    const task = State.tasks.find((t) => t.id === update.id);
+    const waiting = githubWaiting(githubView(update.data as Record<string, unknown>));
+    if (task && task.state !== "finished" && task.state !== "error") {
+      task.state = waiting > 0 ? "question" : "idle";
     }
   }
 

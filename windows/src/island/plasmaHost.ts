@@ -18,9 +18,10 @@ import type { Island } from "./island";
 
 /**
  * Pills whose state is always live, so it is never kept "until seen": Slack is
- * curious exactly while DMs are unread, and stops the moment they're read.
+ * curious exactly while DMs are unread, GitHub while a review or one of your PRs
+ * waits on you, and each stops the moment that's dealt with.
  */
-const LIVE_STATE: ReadonlySet<string> = new Set(["integration_slack"]);
+const LIVE_STATE: ReadonlySet<string> = new Set(["integration_slack", "integration_github"]);
 
 /** States that mean "this Mochi wants you", most urgent first. */
 const URGENCY: Partial<Record<BotStateName, number>> = { approval: 4, question: 3, error: 2, finished: 1 };
@@ -55,24 +56,26 @@ export function installPlasmaHost(island: Island) {
     island.fsm.neverHide = true;
   } else {
     State.approvalsVisible = () => popupOpen;
+    // While the popup is shut nothing of the island can be seen, so it stays
+    // hidden: a compact island animating inside a closed popup cost plasmashell
+    // memory it never got back (every Claude Code tool call revealed it for
+    // another minute). What would have opened it is kept for when it does open.
+    let wanted: Parameters<Island["alert"]>[0] | null = null;
+    const alert = island.alert.bind(island);
+    const reveal = island.reveal.bind(island);
+    const setView = island.setView.bind(island);
+    island.alert = (view) => (popupOpen ? alert(view) : void (wanted = view));
+    island.reveal = () => (popupOpen ? reveal() : undefined);
+    island.setView = (view) => (popupOpen ? setView(view) : void (wanted = view));
     // Tray Open / Settings are explicit requests, so they may open the popup.
-    let askedUntil = 0;
-    void onEvent<string>("tray", () => {
-      askedUntil = performance.now() + 1000;
+    // The island's own tray listener already ran and left its view in `wanted`.
+    void onEvent<string>("tray", (what) => {
+      if (what === "open" || what === "settings") Plasma.post({ type: "expand" });
     });
     const inner = island.fsm.onTransition;
     island.fsm.onTransition = (from, to) => {
       inner?.(from, to);
-      if (to === "home") {
-        // Checked once this event's other listeners have run (the tray flag
-        // is set after the island has already reacted to it).
-        queueMicrotask(() => {
-          const asked = performance.now() < askedUntil;
-          if (asked || popupOpen) Plasma.post({ type: "expand" });
-        });
-      } else if (to === "petit" || to === "hidden") {
-        Plasma.post({ type: "collapse" });
-      }
+      if (to === "petit" || to === "hidden") Plasma.post({ type: "collapse" });
     };
     // Another panel's popup was opened (or this one's): it has all been seen.
     void onEvent<null>("attention-seen", () => {
@@ -84,7 +87,8 @@ export function installPlasmaHost(island: Island) {
       popupOpen = true;
       unseen.clear();
       void Bridge.attentionSeen();
-      if (island.fsm.state !== "home") island.alert(State.defaultView());
+      if (island.fsm.state !== "home") island.alert(wanted ?? State.defaultView());
+      wanted = null;
       State.notify();
     });
     // A click on one of the panel Mochis opens the popup on that pill.
@@ -101,7 +105,7 @@ export function installPlasmaHost(island: Island) {
         State.isPinned = false;
         island.dropPin();
       }
-      if (island.fsm.state === "home") island.fsm.forcePetit();
+      island.fsm.forceHidden();
     });
   }
 
