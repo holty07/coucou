@@ -34,6 +34,19 @@ PlasmoidItem {
     property string islandMode: "hidden"
     property int islandHeight: 160
     property bool paused: false
+    /** Every Mochi that wants you, most urgent first: {id, name, color, state}. */
+    property var attention: []
+
+    function wantsText(a) {
+        switch (a.state) {
+        case "approval": return i18n("%1 needs your approval", a.name);
+        case "question": return a.id === "integration_slack"
+            ? i18n("%1: unread DMs", a.name) : i18n("%1 has a question", a.name);
+        case "error": return i18n("%1 hit an error", a.name);
+        case "finished": return i18n("%1 is ready", a.name);
+        }
+        return a.name;
+    }
 
     readonly property string pageUrl: conn
         ? conn.page + "/index.html?host=" + (inPanel ? "panel" : "desktop")
@@ -51,6 +64,7 @@ PlasmoidItem {
     toolTipMainText: "Coucou"
     toolTipSubText: !connected ? i18n("Coucou isn't running")
         : paused ? i18n("Paused")
+        : attention.length > 0 ? attention.map(wantsText).join("\n")
         : botState === "idle" ? i18n("Watching Claude Code") : botState
 
     Plasmoid.contextualActions: [
@@ -163,6 +177,7 @@ PlasmoidItem {
             botColor = msg.payload.color;
             islandMode = msg.payload.mode;
             paused = msg.payload.paused;
+            attention = msg.payload.attention || [];
             if (msg.payload.size && msg.payload.size.h > 0) islandHeight = msg.payload.size.h;
             break;
         }
@@ -187,12 +202,43 @@ PlasmoidItem {
 
         PanelMochi {
             anchors.centerIn: parent
-            width: Math.min(parent.width, parent.height) * 0.8
+            // Makes room for the attention dots underneath.
+            anchors.verticalCenterOffset: root.attention.length > 0 ? -parent.height * 0.07 : 0
+            width: Math.min(parent.width, parent.height) * (root.attention.length > 0 ? 0.72 : 0.8)
             height: width
             mood: root.botState
             glow: root.botColor
             awake: root.connected && !root.paused
             hovered: compact.containsMouse
+        }
+
+        // One dot per Mochi that wants you, in its pill colour, so you can tell
+        // at a glance whether it's Claude Code, Slack, GitHub…
+        Row {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 1
+            spacing: Math.max(1, compact.height * 0.04)
+            visible: root.connected
+            Repeater {
+                model: root.attention.slice(0, 4)
+                delegate: Rectangle {
+                    required property var modelData
+                    width: Math.max(4, compact.height * 0.14)
+                    height: width
+                    radius: width / 2
+                    color: modelData.color
+                    border.color: modelData.state === "approval" ? "#F5A524"
+                        : modelData.state === "error" ? "#F4505E" : "transparent"
+                    border.width: border.color === "transparent" ? 0 : 1
+                    SequentialAnimation on opacity {
+                        running: modelData.state === "approval" || modelData.state === "question"
+                        loops: Animation.Infinite
+                        NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+                    }
+                }
+            }
         }
 
         // Dragging a file onto the panel Mochi opens the island to drop it into.

@@ -242,6 +242,16 @@ function handleHook(island: Island, payload: HookPayload) {
         break;
       }
       upsert(projectName, cwd, pane);
+      // Nobody can see the card (the Plasma panel popup is shut, and it never
+      // opens by itself): don't make Claude Code wait on it. The terminal asks
+      // right away, and the Mochi still shows that something wants a decision.
+      if (!State.approvalsVisible()) {
+        if (requestId) void Bridge.approvalDecline(requestId);
+        State.updateTask(CLAUDE_ID, "approval");
+        State.appendStep(CLAUDE_ID, `Waiting for approval · ${payload.tool_name ?? "Tool"}`);
+        Sound.play("approval");
+        break;
+      }
       if (pendingTimeout != null) window.clearTimeout(pendingTimeout);
       const tool = payload.tool_name ?? "Tool";
       const input = payload.tool_input ?? {};

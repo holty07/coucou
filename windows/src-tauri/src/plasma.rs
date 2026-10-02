@@ -35,6 +35,61 @@ use crate::log;
 /// Every event the island would get, already serialised as `{event, payload}`.
 static EVENTS: OnceLock<broadcast::Sender<String>> = OnceLock::new();
 
+/// Who has said what about each permission request. With several widgets (a
+/// panel one and a desktop one), one that can't show the card must not cancel
+/// it for another that can: the request only goes back to the terminal once no
+/// widget is showing it and every widget has said so.
+#[derive(Default)]
+struct Verdicts {
+    showing: std::collections::HashSet<u64>,
+    declined: std::collections::HashSet<u64>,
+}
+
+static APPROVALS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Verdicts>>> =
+    std::sync::LazyLock::new(Default::default);
+static NEXT_CLIENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn widgets_connected() -> usize {
+    EVENTS.get().map(|tx| tx.receiver_count()).unwrap_or(0)
+}
+
+fn approval_ack(app: &AppHandle, client: u64, request_id: String) {
+    {
+        let mut map = APPROVALS.lock().unwrap();
+        // Requests that ran out of time without an answer leave entries behind;
+        // there is only ever one live card, so a handful is plenty.
+        if map.len() > 32 && !map.contains_key(&request_id) {
+            map.clear();
+        }
+        let v = map.entry(request_id.clone()).or_default();
+        v.declined.remove(&client);
+        v.showing.insert(client);
+    }
+    crate::approval_ack(app.clone(), request_id);
+}
+
+fn approval_decline(app: &AppHandle, client: u64, request_id: String) {
+    let release = {
+        let mut map = APPROVALS.lock().unwrap();
+        let v = map.entry(request_id.clone()).or_default();
+        v.showing.remove(&client);
+        v.declined.insert(client);
+        let release = v.showing.is_empty() && v.declined.len() >= widgets_connected();
+        if release {
+            map.remove(&request_id);
+        }
+        release
+    };
+    if release {
+        crate::approval_decline(app.clone(), request_id);
+    }
+}
+
+fn approval_decision(app: &AppHandle, request_id: String, decision: String) {
+    APPROVALS.lock().unwrap().remove(&request_id);
+    crate::approval_decision(app.clone(), request_id, decision);
+}
+
 /// Largest message a widget may send: a chat turn, never a file.
 const MAX_MESSAGE: usize = 1 << 20;
 
@@ -196,6 +251,7 @@ async fn session(app: AppHandle, mut socket: WebSocket) {
     // Replies come back here so a slow command (a chat turn) never holds up
     // the events behind it.
     let (reply_tx, mut replies) = mpsc::channel::<String>(32);
+    let client = NEXT_CLIENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     log::line("plasma: widget connected");
 
     loop {
@@ -210,7 +266,7 @@ async fn session(app: AppHandle, mut socket: WebSocket) {
                 let app = app.clone();
                 let reply_tx = reply_tx.clone();
                 tauri::async_runtime::spawn(async move {
-                    let reply = match dispatch(&app, &cmd, args).await {
+                    let reply = match dispatch(&app, client, &cmd, args).await {
                         Ok(result) => json!({ "id": id, "ok": true, "result": result }),
                         Err(error) => json!({ "id": id, "ok": false, "error": error }),
                     };
@@ -232,6 +288,18 @@ async fn session(app: AppHandle, mut socket: WebSocket) {
         }
     }
     log::line("plasma: widget disconnected");
+    // A widget that goes away can't be showing a card any more.
+    let pending: Vec<String> = APPROVALS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, v)| v.showing.contains(&client))
+        .map(|(id, _)| id.clone())
+        .collect();
+    drop(events);
+    for id in pending {
+        approval_decline(&app, client, id);
+    }
 }
 
 fn arg<T: DeserializeOwned>(args: &Value, name: &str) -> Result<T, String> {
@@ -245,7 +313,7 @@ fn ok<T: serde::Serialize>(v: T) -> Result<Value, String> {
 
 /// The island's commands, as in `tauri::generate_handler!` in lib.rs. Anything
 /// that writes ~/.claude/settings.json or a key is absent on purpose.
-async fn dispatch(app: &AppHandle, cmd: &str, args: Value) -> Result<Value, String> {
+async fn dispatch(app: &AppHandle, client: u64, cmd: &str, args: Value) -> Result<Value, String> {
     match cmd {
         "boot" => ok(crate::boot(app.clone(), app.state())),
         "save_settings" => ok(crate::save_settings(app.clone(), app.state(), arg(&args, "settings")?)),
@@ -258,13 +326,9 @@ async fn dispatch(app: &AppHandle, cmd: &str, args: Value) -> Result<Value, Stri
         "quit_app" => ok(app.exit(0)),
         "log_line" => ok(crate::log_line(arg(&args, "message")?)),
         "hooks_status" => ok(crate::hooks_status()),
-        "approval_decision" => ok(crate::approval_decision(
-            app.clone(),
-            arg(&args, "requestId")?,
-            arg(&args, "decision")?,
-        )),
-        "approval_ack" => ok(crate::approval_ack(app.clone(), arg(&args, "requestId")?)),
-        "approval_decline" => ok(crate::approval_decline(app.clone(), arg(&args, "requestId")?)),
+        "approval_decision" => ok(approval_decision(app, arg(&args, "requestId")?, arg(&args, "decision")?)),
+        "approval_ack" => ok(approval_ack(app, client, arg(&args, "requestId")?)),
+        "approval_decline" => ok(approval_decline(app, client, arg(&args, "requestId")?)),
         "chat_send" => ok(crate::chat_send(
             app.state(),
             app.state(),

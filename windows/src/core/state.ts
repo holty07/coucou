@@ -148,6 +148,12 @@ class AppState {
 
   lastActivity = performance.now();
 
+  /**
+   * Whether an approval card can be seen by anyone right now. Always true for an
+   * island window; the Plasma panel widget answers "only while its popup is open".
+   */
+  approvalsVisible: () => boolean = () => true;
+
   settings: Settings = { ...DEFAULT_SETTINGS };
 
   private listeners = new Set<Listener>();
