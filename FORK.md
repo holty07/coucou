@@ -49,6 +49,61 @@ in the widget's right-click menu → **Coucou Settings…** → Claude Code → 
 (shows the diff to `~/.claude/settings.json` and backs it up first). Turn on
 **Launch at login** there too.
 
+## Working on it
+
+Where things are:
+
+| Piece | Files |
+|---|---|
+| Widget bridge (HTTP + WebSocket, approval verdicts across widgets, catch-up replay) | `windows/src-tauri/src/plasma.rs` |
+| Linux stand-in for the Win32 island window | `windows/src-tauri/src/island_linux.rs` |
+| Hook relay over a Unix socket | `windows/src-tauri/src/pipe.rs`, `windows/hook/src/unix.rs` |
+| Chat through Claude Code | `windows/src-tauri/src/claude_code.rs` |
+| herdr focus + KWin raise | `windows/src-tauri/src/herdr.rs` |
+| Slack poller | `windows/src-tauri/src/integrations.rs` (`poll_slack`) |
+| Page side of the widget (WebSocket transport, host messages) | `windows/src/core/plasma.ts`, `windows/src/island/plasmaHost.ts` |
+| The widget itself (QML) | `plasma/package/contents/ui/main.qml`, `PanelMochi.qml` |
+
+The page talks to the widget through `console.log("coucou-host:" + JSON)` (read in
+`onJavaScriptConsoleMessage`), and the widget talks to the page with
+`runJavaScript("window.coucouHost.receive(…)")`. The page is told whether it is in a
+panel or on the desktop by `?host=panel|desktop`.
+
+Dev loop:
+
+```bash
+pkill -x coucou; plasma/install.sh && (setsid -f coucou >/dev/null 2>&1)
+# QML changes only take effect after Plasma reloads the widget:
+systemctl --user restart plasma-plasmashell.service
+tail -f ~/.local/share/coucou/coucou.log          # app log (hooks, widget connects, slack…)
+journalctl --user -u plasma-plasmashell -f | grep coucou   # QML errors
+```
+
+Restarting the app gives it a new port and token; the widgets notice within a few
+seconds and reload their page, so front-end and Rust changes need no Plasma restart.
+
+Debugging the page inside the real widget:
+
+```bash
+systemctl --user set-environment QTWEBENGINE_REMOTE_DEBUGGING=127.0.0.1:9334
+systemctl --user restart plasma-plasmashell.service
+curl -s http://127.0.0.1:9334/json        # one page per widget: ?host=panel / ?host=desktop
+# …inspect over CDP (Runtime.evaluate, Page.captureScreenshot), then turn it off again:
+systemctl --user unset-environment QTWEBENGINE_REMOTE_DEBUGGING
+systemctl --user restart plasma-plasmashell.service
+```
+
+Gotchas learned the hard way:
+
+- `plasmawindowed io.github.holty07.coucou` runs the widget in a window (desktop form
+  factor only), but KWin keeps it behind other windows and Chromium then stops
+  rendering it (`requestAnimationFrame` never fires). Raise it with a KWin script
+  (see `herdr.rs` for the busctl dance) or test in the real widget.
+- The popup's page is preloaded hidden at a 1× pixel ratio; anything sized by
+  `devicePixelRatio` must re-check it when drawing.
+- Fake events for testing: pipe hook JSON into `~/.local/share/coucou/bin/coucou-hook <Event>`.
+  They reach the real widgets too.
+
 ## Remotes
 
 ```bash
